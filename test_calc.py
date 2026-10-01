@@ -1,47 +1,74 @@
 # -*- coding: utf-8 -*-
-"""Teste do cálculo: busca deals reais, calcula forecast, e valida casos
-manualmente (feriados, proporcionalidade, curva, deals atrasados).
+"""Teste do cálculo v2: fetch real + validação das regras (atrasado 2.1,
+proporcionalidade, curva, carry-forward, owner names, self-check, sanity).
+Roda com: PYTHONUTF8=1 python test_calc.py
 """
 import datetime as dt
 
-import config
 import fetch_hubspot as fh
 import calc_forecast as cf
+import selfcheck as sc
 
-HOJE = dt.date(2026, 10, 1)  # spec: hoje é 30/09/2026; uso 01/10 p/ testar janela
+HOJE = dt.date(2026, 10, 1)  # spec: usar a data atual real; fixo p/ teste reproduzível
 
-print("Buscando deals...")
+print("Buscando deals (paralelo, 3 pipelines)...")
 deals, owners, fetched_at = fh.fetch_deals(log=print)
-print(f"Total deals: {len(deals)} | fetched_at: {fetched_at.isoformat()}\n")
+print(f"Total: {len(deals)} deals | fetched_at: {fetched_at.isoformat()}\n")
 
 completos, incompletos, meses = cf.calcular_todos(deals, hoje=HOJE)
 print(f"Completos: {len(completos)} | Incompletos: {len(incompletos)}")
-print(f"Janela de meses: {[m.strftime('%b/%y') for m in meses]}\n")
+print(f"Janela: {[m.strftime('%b/%y') for m in meses]}\n")
 
-# valida casos conhecidos do probe
+# ---- regra 2.1 atrasados (NOVA) ----
 print("=" * 70)
-print("AMOSTRA de completos (com cálculo):")
+print("ATRASADOS (regra 2.1: close+1m como base, +5dúteis):")
 print("=" * 70)
-for d in completos[:8]:
-    print(f"\n  {d['dealname'][:40]!r:42s} {d['pipeline_label']:20s} step={d['step']}")
-    print(f"    closedate={d['closedate']}  potencial={d['potencial']:,}  atrasado={d['atrasado']}")
-    print(f"    ativacao={d['ativacao']}")
-    print(f"    curva={cf._curva(d['potencial'])}  fator_m1={cf._fator_proporcional(d['ativacao']):.4f}")
-    vols = {m.strftime('%b/%y'): round(v) for m, v in d['volumes'].items() if v > 0}
-    print(f"    volumes: {vols}")
-    print(f"    total_linha={int(d['total_linha']):,}")
+n_atras = 0
+for d in completos:
+    if d["atrasado"]:
+        n_atras += 1
+        if n_atras <= 5:
+            print(f"  {d['dealname'][:30]!r:32s} close={d['closedate']} "
+                  f"base={d['base_fechamento']} ativ={d['ativacao']} "
+                  f"atraso={d['dias_atraso']}d")
+print(f"  ... total atrasados: {n_atras}\n")
 
+# ---- owner names (primeiro+último) ----
+print("=" * 70)
+print("OWNER NAMES (primeiro nome + último sobrenome):")
+print("=" * 70)
+for d in completos[:6]:
+    print(f"  full={d['owner_full']!r:40s} -> {d['owner_name']!r}")
+
+# ---- sanity test (spec 5.5) ----
 print("\n" + "=" * 70)
-print("INCOMPLETOS:")
+print("SANITY TEST (deals fictícios):")
 print("=" * 70)
-for d in incompletos[:10]:
-    print(f"  {d['dealname'][:40]!r:42s} {d['pipeline_label']:20s} -> {d['motivo_incompleto']}")
+for desc, esp, curva, fator, out in cf.sanity_test_deals(HOJE):
+    print(f"  {desc}: curva={curva} fator={fator:.4f} (esp 16/31={16/31:.4f})")
+    esp_m1, esp_m2 = esp['m1'], esp['m2']
+    esp_m3 = esp.get('m3', esp.get('m3+', 0))
+    ok = (abs(fator-16/31)<0.001 and abs(out[0]-esp_m1)<2 and
+          abs(out[1]-esp_m2)<2 and abs(out[2]-esp_m3)<2)
+    print(f"    M1={int(out[0]):,} (esp {int(esp_m1):,}) | "
+          f"M2={int(out[1]):,} (esp {int(esp_m2):,}) | "
+          f"M3={int(out[2]):,} (esp {int(esp_m3):,})")
+    print(f"    -> {'OK' if ok else 'FALHOU'}")
 
-# TOTAL por mês
+# ---- self-check ----
 print("\n" + "=" * 70)
-print("TOTAL por mês (todos completos):")
+print("SELF-CHECK:")
+print("=" * 70)
+checks = sc.run(completos, incompletos, meses, deals, hoje=HOJE)
+print(f"  {sc.summary(checks)}")
+for cid, st, msg, dl in checks:
+    if st == "warn":
+        print(f"  ⚠ [{cid}] {msg} ({len(dl)} deals)")
+
+# ---- total ----
+print("\n" + "=" * 70)
+print("TOTAL por mês:")
 print("=" * 70)
 for m in meses:
-    tot = sum(d['volumes'][m] for d in completos)
-    print(f"  {m.strftime('%b/%y'):8s} {int(tot):>10,}")
+    print(f"  {m.strftime('%b/%y'):8s} {int(sum(d['volumes'][m] for d in completos)):>10,}")
 print(f"  {'TOTAL':8s} {int(sum(d['total_linha'] for d in completos)):>10,}")

@@ -102,10 +102,13 @@ PROP_POTENCIAL = "share_vs_potencial_total"
 PROP_POTENCIAL_LABEL = "Potencial Mês (Total)"
 
 # Propriedades trazidas por deal na Search API.
+# hs_lastmodifieddate = atualização incremental (spec 4.4): nas rodadas
+# seguintes, buscar só deals modificados desde a última atualização.
 DEAL_PROPERTIES = [
     "dealname", "dealstage", "pipeline", "hubspot_owner_id",
-    "closedate", PROP_POTENCIAL,
+    "closedate", PROP_POTENCIAL, "hs_lastmodifieddate",
 ]
+PROP_LASTMOD = "hs_lastmodifieddate"
 
 # ---- Regras de cálculo (spec) --------------------------------------------
 DIAS_UTEIS_POS_FECHAMENTO = 5  # ativação = fechamento + 5 dias úteis

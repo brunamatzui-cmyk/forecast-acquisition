@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Busca todos os deals nas etapas 4/5/6 dos 3 pipelines de aquisição via
-HubSpot Search API, com paginação. Resolve o nome do proprietário pelo ID
-(via Owners API). Mesma abordagem do ../dashboard/activation/fetch_hubspot.py:
-REST direta + Private App Token, nunca MCP.
+"""Camada 1 — coleta de deals do HubSpot (spec 4.1/4.3/4.4).
 
-Retorna:
-  deals:   lista de dicts com dados do deal (sem o volume calculado).
-  owners:  dict hubspot_owner_id -> nome.
-  incompletos: deals sem closedate ou potencial (separados, fora dos totais).
-  fetched_at: timestamp ISO da busca.
+- Filtra pipelines E etapas direto na consulta (nunca traz tudo p/ filtrar).
+- Só pede as propriedades necessárias, página máxima (100).
+- Owners em uma única chamada em lote, reutilizada.
+- Consultas por pipeline em PARALELO (spec 4.3) via ThreadPoolExecutor.
+- Atualização incremental: buscar só deals com hs_lastmodifieddate >= última
+  atualização, mesclar com os já carregados; e confirmar elegíveis (ainda em
+  4/5/6) com uma consulta leve de IDs.
 """
 import datetime as dt
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
 import config
+import theme
 
 
 def _headers():
@@ -26,20 +27,23 @@ def _headers():
 
 
 def _val(prop_value):
-    """Propriedades vêm como {'value': ..., 'timestamp': ...} ou direto."""
     if isinstance(prop_value, dict):
         return prop_value.get("value")
     return prop_value
 
 
-def _search_page(stage_ids, pipeline_id, after=None):
-    """Uma página da Search API. Filtro IN usa 'values' (array), não 'value'
-    string. Paginação via body['after'] = int(cursor)."""
+def _search_page(stage_ids, pipeline_id, after=None, modified_since=None):
+    """Uma página da Search API. IN usa 'values' (array). Paginação via after.
+    modified_since (ms epoch): filtro hs_lastmodifieddate GTE p/ incremental."""
+    filters = [
+        {"value": pipeline_id, "propertyName": "pipeline", "operator": "EQ"},
+        {"values": list(stage_ids), "propertyName": "dealstage", "operator": "IN"},
+    ]
+    if modified_since is not None:
+        filters.append({"value": str(modified_since),
+                        "propertyName": config.PROP_LASTMOD, "operator": "GTE"})
     body = {
-        "filterGroups": [{"filters": [
-            {"value": pipeline_id, "propertyName": "pipeline", "operator": "EQ"},
-            {"values": list(stage_ids), "propertyName": "dealstage", "operator": "IN"},
-        ]}],
+        "filterGroups": [{"filters": filters}],
         "properties": config.DEAL_PROPERTIES,
         "limit": config.PAGE_SIZE,
     }
@@ -57,42 +61,53 @@ def _search_page(stage_ids, pipeline_id, after=None):
 
 
 def _parse_potencial(raw):
-    """Potencial vem como string. Pode ter separador de milhar brasileiro
-    ('16.000' = 16000, NÃO 16.0). Heurística BR: se há '.' e a parte após
-    tem != 3 dígitos, é decimal; se tem 3 dígitos (ou múltiplos grupos),
-    é separador de milhar. Também trata ',' como decimal BR.
-    Retorna int >= 0 ou None se vazio/inválido."""
+    """String c/ separador de milhar BR ('16.000'=16000). Ver v1."""
     if raw is None:
         return None
     s = str(raw).strip()
     if s == "":
         return None
     s = s.replace(" ", "")
-    has_dot = "." in s
-    has_comma = "," in s
-    if has_dot and has_comma:
-        # BR: ponto=milhar, vírgula=decimal  ->  "1.234,56"
+    if "." in s and "," in s:
         s = s.replace(".", "").replace(",", ".")
-    elif has_dot:
+    elif "." in s:
         parts = s.split(".")
-        # grupos de milhar: todos com 3 dígitos exceto o primeiro -> separador
         if all(len(p) == 3 for p in parts[1:]) and len(parts) > 1:
-            s = "".join(parts)           # "16.000" -> "16000"
-        # senão mantém como decimal (ex: "1.5" -> 1.5)
-    elif has_comma:
-        # só vírgula -> decimal BR  "1234,56" -> "1234.56"
+            s = "".join(parts)
+    elif "," in s:
         s = s.replace(",", ".")
     try:
         n = float(s)
     except ValueError:
         return None
-    if n != n or n < 0:  # NaN ou negativo
+    if n != n or n < 0:
         return None
     return int(round(n))
 
 
+def _parse_hs_date(raw):
+    """closedate/lastmodified: '2026-10-30' ou epoch-ms -> date."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if s == "":
+        return None
+    if s.isdigit() and len(s) >= 12:
+        try:
+            return dt.datetime.fromtimestamp(int(s) / 1000.0).date()
+        except (ValueError, OSError):
+            pass
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return dt.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def fetch_owners():
-    """Mapeia hubspot_owner_id -> nome completo (Owners API v3)."""
+    """Mapeia hubspot_owner_id -> nome completo (Owners API v3). Uma chamada
+    paginada, reutilizada por todos os pipelines (spec 4.3)."""
     headers = {"Authorization": f"Bearer {config._load_hubspot_token()}"}
     owners = {}
     after = ""
@@ -114,79 +129,105 @@ def fetch_owners():
     return owners
 
 
-def fetch_deals(log=print):
-    """Busca TODOS os deals dos 3 pipelines nas etapas 4/5/6.
+def _fetch_pipeline(pid, plabel, stage_ids, modified_since=None):
+    """Busca TODOS os deals de um pipeline (paginado)."""
+    raw, after = [], None
+    while True:
+        page = _search_page(stage_ids, pid, after, modified_since)
+        raw.extend(page.get("results", []))
+        after = page.get("paging", {}).get("next", {}).get("after")
+        if not after:
+            break
+        time.sleep(0.2)
+    return pid, plabel, raw
 
-    Retorna (deals, owners, fetched_at):
-      deals: lista de dicts com chaves
-        deal_id, dealname, stage_id, step, stage_label, pipeline_id,
-        pipeline_label, owner_name, closedate (datetime|None),
-        potencial (int|None), atrasado (bool).
+
+def _build_deal(d, owners, plabel_default, hoje_date):
+    p = d.get("properties", {})
+    oid = _val(p.get("hubspot_owner_id"))
+    owner_full = owners.get(oid) if oid else None
+    owner_name = theme.owner_display_name(owner_full) if owner_full else "(sem proprietário)"
+    stage_id = _val(p.get("dealstage"))
+    step, stage_label = config.STAGE_BY_ID.get(stage_id, (None, str(stage_id)))
+    closedate = _parse_hs_date(_val(p.get("closedate")))
+    potencial = _parse_potencial(_val(p.get(config.PROP_POTENCIAL)))
+    lastmod = _parse_hs_date(_val(p.get(config.PROP_LASTMOD)))
+    pid = _val(p.get("pipeline"))
+    return {
+        "deal_id": d.get("id"),
+        "dealname": (_val(p.get("dealname")) or "(sem nome)").strip(),
+        "stage_id": stage_id,
+        "step": step,
+        "stage_label": stage_label,
+        "pipeline_id": pid,
+        "pipeline_label": config.PIPELINES.get(pid, plabel_default),
+        "owner_name": owner_name,
+        "owner_full": owner_full or "",
+        "closedate": closedate,
+        "potencial": potencial,
+        "lastmodified": lastmod,
+        "atrasado": bool(closedate and closedate < hoje_date and step in (4, 5, 6)),
+    }
+
+
+def fetch_deals(log=print, modified_since=None, hoje_date=None):
+    """Busca deals dos 3 pipelines nas etapas 4/5/6, em paralelo.
+
+    modified_since (datetime): se passado, busca incremental (só modificados
+    desde então). None = carga completa.
+    Retorna (deals, owners, fetched_at).
     """
+    if hoje_date is None:
+        hoje_date = dt.date.today()
     owners = fetch_owners()
     log(f"Owners: {len(owners)} mapeados.")
 
-    raw_deals = []
-    for pid, plabel in config.PIPELINES.items():
-        stage_ids = [s[0] for s in config.STAGES[pid]]
-        after = None
-        n_before = len(raw_deals)
-        while True:
-            page = _search_page(stage_ids, pid, after)
-            raw_deals.extend(page.get("results", []))
-            after = page.get("paging", {}).get("next", {}).get("after")
-            if not after:
-                break
-            time.sleep(0.25)
-        log(f"  {plabel}: {len(raw_deals) - n_before} deals.")
+    ms = int(modified_since.timestamp() * 1000) if modified_since else None
+    tasks = [(pid, plabel, [s[0] for s in config.STAGES[pid]], ms)
+             for pid, plabel in config.PIPELINES.items()]
+    deals = []
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = [ex.submit(_fetch_pipeline, *t) for t in tasks]
+        for f in futures:
+            pid, plabel, raw = f.result()
+            for d in raw:
+                deals.append(_build_deal(d, owners, plabel, hoje_date))
+            log(f"  {plabel}: {len(raw)} deals.")
 
     fetched_at = dt.datetime.now()
-    deals = []
-    for d in raw_deals:
-        p = d.get("properties", {})
-        oid = _val(p.get("hubspot_owner_id"))
-        owner_name = owners.get(oid) if oid else None
-        if not owner_name:
-            owner_name = "(sem proprietário)"
-        stage_id = _val(p.get("dealstage"))
-        step, stage_label = config.STAGE_BY_ID.get(stage_id, (None, str(stage_id)))
-        closed_raw = _val(p.get("closedate"))
-        closedate = _parse_hs_date(closed_raw)
-        potencial = _parse_potencial(_val(p.get(config.PROP_POTENCIAL)))
-        deals.append({
-            "deal_id": d.get("id"),
-            "dealname": (_val(p.get("dealname")) or "(sem nome)").strip(),
-            "stage_id": stage_id,
-            "step": step,
-            "stage_label": stage_label,
-            "pipeline_id": d.get("pipeline") if "pipeline" in d else pid,
-            "pipeline_label": plabel if False else config.PIPELINES.get(
-                _val(p.get("pipeline")), plabel),
-            "owner_name": owner_name,
-            "closedate": closedate,
-            "potencial": potencial,
-            "atrasado": bool(closedate and closedate < fetched_at.date()
-                             and step in (4, 5, 6)),
-        })
     return deals, owners, fetched_at
 
 
-def _parse_hs_date(raw):
-    """HubSpot closedate vem como '2026-10-30' ou epoch-ms. Retorna date."""
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if s == "":
-        return None
-    # epoch millis
-    if s.isdigit() and len(s) >= 12:
-        try:
-            return dt.datetime.fromtimestamp(int(s) / 1000.0).date()
-        except (ValueError, OSError):
-            pass
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-        try:
-            return dt.datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
+def fetch_eligible_ids(hoje_date=None):
+    """Consulta leve: só IDs dos deals ainda em 4/5/6 (spec 4.4).
+    Usado p/ remover deals que saíram das etapas num refresh incremental."""
+    if hoje_date is None:
+        hoje_date = dt.date.today()
+    ids = set()
+    for pid, plabel in config.PIPELINES.items():
+        stage_ids = [s[0] for s in config.STAGES[pid]]
+        body = {
+            "filterGroups": [{"filters": [
+                {"value": pid, "propertyName": "pipeline", "operator": "EQ"},
+                {"values": list(stage_ids), "propertyName": "dealstage", "operator": "IN"},
+            ]}],
+            "properties": ["dealstage"],   # enxuto: só precisa do ID
+            "limit": config.PAGE_SIZE,
+        }
+        after = None
+        while True:
+            if after:
+                body["after"] = int(after)
+            r = requests.post(f"{config.BASE}/crm/v3/objects/deals/search",
+                              headers=_headers(), json=body, timeout=60)
+            if r.status_code == 429:
+                time.sleep(int(r.headers.get("Retry-After", "10")) + 1); continue
+            r.raise_for_status()
+            page = r.json()
+            for d in page.get("results", []):
+                ids.add(d.get("id"))
+            after = page.get("paging", {}).get("next", {}).get("after")
+            if not after:
+                break
+            time.sleep(0.2)
+    return ids

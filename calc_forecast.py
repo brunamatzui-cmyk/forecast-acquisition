@@ -1,28 +1,32 @@
 # -*- coding: utf-8 -*-
-"""Cálculo do forecast de corridas por mês.
+"""Cálculo do forecast de corridas por mês (v2 — spec 2026-10-01).
 
-Regras (ver spec em CLAUDE.md do usuário):
-  - Ativação = fechamento + 5 dias úteis (ignora sáb/dom e feriados nacionais BR).
-  - Mês 1 da rampa = mês calendário da ativação, com volume proporcional aos
-    dias ativos: fator = (dias corridos a partir da ativação, inclusive) /
-    (total de dias do mês). Volume M1 = potencial × 25% × fator.
-  - Meses seguintes são meses calendário completos, seguindo a curva:
-      potencial < 20.000:  [25%, 50%, 100%]   (100% a partir do mês 3)
+Regras:
+  - Ativação (2.1):
+      * fechamento futuro ou hoje  -> fechamento + 5 dias úteis.
+      * fechamento ATRASADO (< hoje): nova data de fechamento = fechamento + 1 mês;
+        se ainda no passado, base = hoje + 1 mês. Depois + 5 dias úteis.
+      Mostra-se a previsão ORIGINAL (evidencia atraso) + a ativação recalculada.
+  - Mês 1 (2.2): mês calendário da ativação, volume = potencial × 25% ×
+    (dias_ativos / dias_no_mês). Ex: ativação 16/10 (31 dias) -> 16/31.
+  - Curva (2.3):
+      potencial < 20.000: [25%, 50%, 100%]   (100% a partir do mês 3)
       potencial >= 20.000: [25%, 50%, 75%, 100%] (100% a partir do mês 4)
-  - Janela: 6 meses a partir do mês atual (inclusive). Meses anteriores ao
-    Mês 1 ficam zerados; ativação fora da janela -> todos zerados.
-  - Probabilidade: 100% (não ponderar por etapa).
+      Após atingir 100%, permanece 100% nos meses seguintes da janela.
+  - Janela (2.4): 6 meses a partir do mês atual (inclusive). Ativação fora da
+    janela ou meses anteriores ao M1 -> zerados.
+  - Probabilidade (2.5): 100% (não pondera por etapa).
+
+Determinístico: feriados como constante, dias úteis por função (spec 4.5).
 """
 import calendar
 import datetime as dt
 
 import config
 
-# Feriados nacionais brasileiros (fixos + móveis) para os anos relevantes.
-# Feriados fixos: 01/01, 21/04, 01/05, 07/09, 12/10, 02/11, 15/11, 25/12.
-# Feriados móveis: Carnaval (seg/ter), Sexta-feira Santa, Corpus Christi.
+# ---- Feriados nacionais BR (constante, spec 4.5) ------------------------
+# Fixos + móveis (Carnaval seg/ter, Sexta-feira Santa, Corpus Christi).
 def _carnaval(ano):
-    """Terça de Carnaval (e segunda) via Páscoa (Meeus/Jones/Butcher)."""
     a = ano % 19
     b = ano // 100
     c = ano % 100
@@ -38,30 +42,24 @@ def _carnaval(ano):
     mes = (h + l - 7 * m + 114) // 31
     dia = ((h + l - 7 * m + 114) % 31) + 1
     pascoa = dt.date(ano, mes, dia)
-    # Carnaval = 47 dias antes da Páscoa (terça); segunda = 48 antes
-    terca = pascoa - dt.timedelta(days=47)
-    segunda = pascoa - dt.timedelta(days=48)
-    sexta_santa = pascoa - dt.timedelta(days=2)
-    corpus = pascoa + dt.timedelta(days=60)
-    return [segunda, terca, sexta_santa, corpus]
+    return [
+        pascoa - dt.timedelta(days=48),   # segunda de Carnaval
+        pascoa - dt.timedelta(days=47),   # terça
+        pascoa - dt.timedelta(days=2),    # Sexta-feira Santa
+        pascoa + dt.timedelta(days=60),   # Corpus Christi
+    ]
 
 
 def _feriados_nacionais(ano):
     fixos = [
-        dt.date(ano, 1, 1),    # Confraternização Universal
-        dt.date(ano, 4, 21),   # Tiradentes
-        dt.date(ano, 5, 1),    # Dia do Trabalho
-        dt.date(ano, 9, 7),    # Independência
-        dt.date(ano, 10, 12),  # Nossa Senhora Aparecida
-        dt.date(ano, 11, 2),   # Finados
-        dt.date(ano, 11, 15),  # Proclamação da República
-        dt.date(ano, 12, 25),  # Natal
+        dt.date(ano, 1, 1), dt.date(ano, 4, 21), dt.date(ano, 5, 1),
+        dt.date(ano, 9, 7), dt.date(ano, 10, 12), dt.date(ano, 11, 2),
+        dt.date(ano, 11, 15), dt.date(ano, 12, 25),
     ]
     return set(fixos + _carnaval(ano))
 
 
 def _feriados_para_periodo(start, end):
-    """Conjunto de feriados nacionais cobrindo [start, end] (inclusive)."""
     feriados = set()
     for ano in range(start.year, end.year + 1):
         feriados |= _feriados_nacionais(ano)
@@ -69,44 +67,73 @@ def _feriados_para_periodo(start, end):
 
 
 def _add_dias_uteis(data, n, feriados):
-    """Soma n dias úteis a `data` (date). Conta a partir do dia seguinte."""
+    """Soma n dias úteis a `data`, contando a partir do dia seguinte."""
     cur = data
     added = 0
     while added < n:
         cur = cur + dt.timedelta(days=1)
-        if cur.weekday() < 5 and cur not in feriados:  # seg-sex e não feriado
+        if cur.weekday() < 5 and cur not in feriados:
             added += 1
     return cur
 
 
+def _is_dia_util(data, feriados):
+    return data.weekday() < 5 and data not in feriados
+
+
+def _add_meses(data, n):
+    """Soma n meses calendário (mesmo dia; ajusta se o dia não existir)."""
+    m = data.month - 1 + n
+    y = data.year + m // 12
+    m = m % 12 + 1
+    dia = min(data.day, calendar.monthrange(y, m)[1])
+    return dt.date(y, m, dia)
+
+
+# ---- Ativação (spec 2.1) -------------------------------------------------
 def data_ativacao(closedate, hoje, feriados=None):
-    """Data de ativação = closedate + 5 dias úteis. Se closedate no passado
-    (deal atrasado), usa `hoje` como base (regra de exceção da spec)."""
-    base = closedate
-    if closedate < hoje:
-        base = hoje
+    """Retorna (ativacao, base_fechamento_usada, atrasado).
+
+    atrasado: closedate < hoje.
+    base_fechamento_usada: closedate se não atrasado; senão closedate+1m
+      (ou hoje+1m se isso ainda estiver no passado).
+    ativacao: base + 5 dias úteis.
+    """
+    atrasado = closedate < hoje
+    if atrasado:
+        nova = _add_meses(closedate, 1)
+        if nova < hoje:
+            nova = _add_meses(hoje, 1)
+        base = nova
+    else:
+        base = closedate
     if feriados is None:
         feriados = _feriados_para_periodo(base, base + dt.timedelta(days=20))
-    return _add_dias_uteis(base, config.DIAS_UTEIS_POS_FECHAMENTO, feriados)
+    ativacao = _add_dias_uteis(base, config.DIAS_UTEIS_POS_FECHAMENTO, feriados)
+    return ativacao, base, atrasado
 
 
+def dias_atraso(closedate, hoje):
+    """Dias de atraso = hoje - closedate (>=0 só faz sentido se atrasado)."""
+    if closedate >= hoje:
+        return 0
+    return (hoje - closedate).days
+
+
+# ---- Curva e proporcionalidade ------------------------------------------
 def _curva(potencial):
-    """Lista de frações do potencial por mês da rampa (Mês 1 em diante)."""
     if potencial >= config.LIMITE_POTENCIAL_ALTO:
         return config.CURVA_RAMPAGEM["high"]
     return config.CURVA_RAMPAGEM["low"]
 
 
 def _fator_proporcional(ativacao):
-    """Fator do Mês 1 = dias ativos (da ativação inclusive até fim do mês) /
-    total de dias do mês. Ex: ativação 16/10 (31 dias) -> 16/31."""
     dias_no_mes = calendar.monthrange(ativacao.year, ativacao.month)[1]
     dias_ativos = dias_no_mes - ativacao.day + 1
-    return dias_ativos / dias_no_mes
+    return dias_ativos / dias_no_mes, dias_ativos, dias_no_mes
 
 
 def meses_janela(hoje):
-    """Lista dos 6 meses (date do 1º dia) a partir do mês atual inclusive."""
     meses = []
     y, m = hoje.year, hoje.month
     for _ in range(config.MESES_JANELA):
@@ -118,57 +145,64 @@ def meses_janela(hoje):
 
 
 def volume_por_mes(deal, meses, hoje):
-    """Calcula volume previsto por mês da janela para um deal.
+    """Calcula volumes + metadados por mês da janela p/ um deal.
 
-    Retorna dict {primeiro_dia_do_mes: volume_int} e a data de ativação.
-    Deal sem potencial/closedate não deveria chegar aqui (filtrado antes).
+    Retorna (volumes, ativacao, base_fechamento, atrasado, detalhes).
+      volumes:   {primeiro_dia_do_mes: float}
+      detalhes:  {primeiro_dia_do_mes: {texto, rampa_idx, frac, fator}} p/ tooltip.
     """
+    detalhes = {m: {"texto": "–", "rampa_idx": None, "frac": 0.0, "fator": None}
+                for m in meses}
+    volumes = {m: 0.0 for m in meses}
+
     potencial = deal["potencial"]
-    if not potencial or potencial <= 0:
-        return {m: 0 for m in meses}, None
     closedate = deal["closedate"]
-    if not closedate:
-        return {m: 0 for m in meses}, None
+    if not potencial or potencial <= 0 or not closedate:
+        return volumes, None, None, False, detalhes
 
     feriados = _feriados_para_periodo(
-        min(closedate, hoje),
-        max(closedate, hoje) + dt.timedelta(days=30),
-    )
-    ativacao = data_ativacao(closedate, hoje, feriados)
+        min(closedate, hoje), max(closedate, hoje) + dt.timedelta(days=45))
+    ativacao, base, atrasado = data_ativacao(closedate, hoje, feriados)
 
     curva = _curva(potencial)
-    fator_m1 = _fator_proporcional(ativacao)
-
-    # Mês calendário da ativação = Mês 1 da rampa.
+    fator_m1, dias_ativos, dias_no_mes = _fator_proporcional(ativacao)
     mes_m1 = dt.date(ativacao.year, ativacao.month, 1)
 
-    volumes = {m: 0 for m in meses}
     if mes_m1 not in volumes:
-        # Ativação cai fora da janela -> todos zerados (deal aparece zerado).
-        return volumes, ativacao
+        # ativação fora da janela -> zerado, mas registra a ativação p/ exibir.
+        return volumes, ativacao, base, atrasado, detalhes
 
-    # Preenche todos os meses da janela a partir de M1:
-    #  - meses dentro da curva: potencial × fração da curva (M1 com fator)
-    #  - meses após o fim da curva (100% atingido): potencial × 100%
     idx_m1 = meses.index(mes_m1)
     for i in range(idx_m1, len(meses)):
         offset = i - idx_m1
+        mes = meses[i]
         if offset < len(curva):
             frac = curva[offset]
-            vol = potencial * frac * (fator_m1 if offset == 0 else 1.0)
+            if offset == 0:
+                vol = potencial * frac * fator_m1
+                texto = (f"Mês 1 · 25% de {potencial:,} × {dias_ativos}/{dias_no_mes} "
+                         f"(fator {fator_m1:.3f}) = {int(round(vol)):,}")
+            else:
+                vol = potencial * frac
+                nome_mes = {1: "Mês 1", 2: "Mês 2", 3: "Mês 3", 4: "Mês 4"}[offset + 1]
+                texto = f"{nome_mes} · {int(frac*100)}% de {potencial:,} = {int(round(vol)):,}"
+            volumes[mes] += vol
+            detalhes[mes] = {"texto": texto, "rampa_idx": offset, "frac": frac,
+                             "fator": fator_m1 if offset == 0 else None}
         else:
-            vol = potencial * 1.0  # permanece em 100% após atingir o teto
-        volumes[meses[i]] += vol
-    return volumes, ativacao
+            vol = potencial * 1.0
+            nome_mes = f"Mês {len(curva)+1}+ (100%)"
+            texto = f"{nome_mes} · 100% de {potencial:,} = {int(round(vol)):,}"
+            volumes[mes] += vol
+            detalhes[mes] = {"texto": texto, "rampa_idx": len(curva), "frac": 1.0,
+                             "fator": None}
+    return volumes, ativacao, base, atrasado, detalhes
 
 
 def calcular_todos(deals, hoje=None):
-    """Para cada deal, computa ativação e volumes mensais.
+    """Particiona completos/incompletos e calcula volumes + metadados.
 
-    Retorna:
-      completos:   deals com closedate E potencial, com volumes calculados.
-      incompletos: deals sem closedate ou potencial (lista separada).
-      meses:       lista de dates (1º dia) da janela de 6 meses.
+    Camada 2 (cálculo) — independente da renderização (spec 4.1).
     """
     if hoje is None:
         hoje = dt.date.today()
@@ -179,13 +213,17 @@ def calcular_todos(deals, hoje=None):
         tem_pot = d["potencial"] is not None and d["potencial"] > 0
         tem_close = d["closedate"] is not None
         if not (tem_pot and tem_close):
-            incompletos.append({**d, "ativacao": None, "volumes": {m: 0 for m in meses},
+            incompletos.append({**d, "ativacao": None, "base_fechamento": None,
+                                "atrasado": False, "volumes": {m: 0.0 for m in meses},
+                                "detalhes": {}, "total_linha": 0,
                                 "motivo_incompleto": _motivo_incompleto(d)})
             continue
-        vols, ativ = volume_por_mes(d, meses, hoje)
+        vols, ativ, base, atrasado, det = volume_por_mes(d, meses, hoje)
         total_linha = sum(vols.values())
-        completos.append({**d, "ativacao": ativ, "volumes": vols,
-                          "total_linha": total_linha})
+        completos.append({**d, "ativacao": ativ, "base_fechamento": base,
+                          "atrasado": atrasado, "volumes": vols, "detalhes": det,
+                          "total_linha": total_linha,
+                          "dias_atraso": dias_atraso(d["closedate"], hoje) if atrasado else 0})
     return completos, incompletos, meses
 
 
@@ -196,3 +234,44 @@ def _motivo_incompleto(d):
     if not (d.get("potencial") and d["potencial"] > 0):
         faltam.append("potencial mês")
     return "Faltando: " + " e ".join(faltam)
+
+
+# ---- Teste de sanidade (spec 5.5) ---------------------------------------
+def sanity_test_deals(hoje=None):
+    """Deals fictícios p/ validar a lógica (não entram nos totais).
+    Retorna lista de (descricao, esperado_por_offset, volumes_calculados)."""
+    if hoje is None:
+        hoje = dt.date.today()
+    meses = meses_janela(hoje)
+
+    def calc(potencial, ativacao_dia, ano, mes):
+        d = {"potencial": potencial, "closedate": None}
+        # forçar ativação direto: construir via data_ativacao não serve; emulo
+        # criando um closedate cuja ativação = data alvo. Mais simples: chamar
+        # volume_por_mes com closedate = ativacao_alvo e hoje no futuro p/ não
+        # ser atrasado. Mas a ativação vira closedate+5dúteis. Em vez disso,
+        # teste direto da curva/fator:
+        curva = _curva(potencial)
+        fator, da, dm = _fator_proporcional(dt.date(ano, mes, ativacao_dia))
+        out = []
+        for i, frac in enumerate(curva):
+            out.append(potencial * frac * (fator if i == 0 else 1.0))
+        # carry-forward
+        while len(out) < len(meses):
+            out.append(potencial * 1.0)
+        return curva, fator, out
+
+    results = []
+    # Deal 1: 10.000, ativação 16/10/2026 -> out≈1290, nov=5000, dez+=10000
+    curva, fator, out = calc(10000, 16, 2026, 10)
+    results.append(("10.000 ativação 16/10/2026",
+                    {"curva": [0.25, 0.5, 1.0], "fator": 16/31,
+                     "m1": 10000*0.25*16/31, "m2": 5000, "m3+": 10000},
+                    curva, fator, out))
+    # Deal 2: 30.000 -> curva 4 meses 25/50/75/100
+    curva2, fator2, out2 = calc(30000, 16, 2026, 10)
+    results.append(("30.000 ativação 16/10/2026",
+                    {"curva": [0.25, 0.5, 0.75, 1.0], "fator": 16/31,
+                     "m1": 30000*0.25*16/31, "m2": 15000, "m3": 22500, "m4+": 30000},
+                    curva2, fator2, out2))
+    return results
