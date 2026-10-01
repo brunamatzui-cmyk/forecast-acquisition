@@ -266,8 +266,6 @@ def _table_html(sel, meses, dark):
     # totais por coluna
     tot_mes = {m: sum(d["volumes"].get(m, 0) for d in sel) for m in meses}
     tot_6m = sum(d["total_linha"] for d in sel)
-    # max p/ heatmap (por coluna, relativo ao pico do mês)
-    max_mes = {m: max((d["volumes"].get(m, 0) for d in sel), default=0) for m in meses}
 
     # cabeçalho
     head = ['<div class="fc-wrap"><table class="fc-table"><thead><tr>']
@@ -309,7 +307,7 @@ def _table_html(sel, meses, dark):
             body.append(f'<td style="background:rgba(0,0,0,0.03);font-weight:600">{fmt_int(sub_mes[m])}</td>')
         body.append('</tr>')
         for d in grp:
-            body.append(_deal_row(d, meses, max_mes, dark))
+            body.append(_deal_row(d, meses, dark))
 
     # rodapé (repete total)
     foot = ['</tbody><tfoot><tr class="fc-foot"><td>TOTAL</td><td></td><td></td><td></td><td></td><td></td>']
@@ -320,7 +318,7 @@ def _table_html(sel, meses, dark):
     return "".join(head + totrow + body + foot)
 
 
-def _deal_row(d, meses, max_mes, dark):
+def _deal_row(d, meses, dark):
     c_pipe = theme.pipeline_color(d["pipeline_label"], dark)
     c_stage = theme.stage_color(d["step"], dark)
     short = theme.PIPELINE_SHORT.get(d["pipeline_label"], "")
@@ -352,7 +350,7 @@ def _deal_row(d, meses, max_mes, dark):
     row.append(f'<td>{fmt_int(d["potencial"])}</td>')
     # total 6m (coluna destacada)
     row.append(f'<td class="fc-total-col">{fmt_int(d["total_linha"])}</td>')
-    # meses com heatmap + tooltip
+    # meses: valor limpo (sem heatmap) + tooltip de cálculo; zero => "–" cinza
     for m in meses:
         v = d["volumes"].get(m, 0)
         det = d.get("detalhes", {}).get(m)
@@ -360,10 +358,7 @@ def _deal_row(d, meses, max_mes, dark):
         if v <= 0:
             row.append(f'<td class="fc-cell-zero" title="{tip}">–</td>')
         else:
-            frac = v / max_mes[m] if max_mes[m] else 0
-            bg = theme.heatmap_color(frac, dark)
-            txt_col = "#fff" if frac > 0.55 else "#0b0b0b"
-            row.append(f'<td class="fc-cell" title="{tip}" style="background:{bg};color:{txt_col}">{fmt_int(v)}</td>')
+            row.append(f'<td class="fc-cell" title="{tip}">{fmt_int(v)}</td>')
     row.append('</tr>')
     return "".join(row)
 
