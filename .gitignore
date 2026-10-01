@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+_streamlit.log
+_schema_discovered.json
+_*.log
+.streamlit/secrets.toml
