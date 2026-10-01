@@ -24,20 +24,36 @@ except ImportError:
 
 
 def _load_hubspot_token():
-    """Token: secret do Streamlit > env HUBSPOT_TOKEN."""
+    """Token: secret do Streamlit > env HUBSPOT_TOKEN. Diagnóstico claro se faltar."""
+    diag = []
     if st is not None:
         try:
             secret = st.secrets.get("HUBSPOT_TOKEN")
             if secret:
-                return secret
-        except Exception:
-            pass
+                return str(secret)
+            try:
+                keys = list(st.secrets.keys())
+            except Exception:
+                keys = []
+            diag.append(
+                f"secret 'HUBSPOT_TOKEN' ausente ou vazio (keys disponíveis: "
+                f"{keys or 'nenhum'})"
+            )
+        except Exception as e:
+            diag.append(
+                f"st.secrets ilegível ({type(e).__name__}) — provável erro de "
+                f"sintaxe TOML no Secret Manager: {e}"
+            )
+    else:
+        diag.append("Streamlit não importado")
     env_token = os.environ.get("HUBSPOT_TOKEN")
     if env_token:
         return env_token
+    diag.append("env var HUBSPOT_TOKEN não definida")
     raise RuntimeError(
-        "HUBSPOT_TOKEN não encontrado. Defina a variável de ambiente "
-        "HUBSPOT_TOKEN ou configure o secret HUBSPOT_TOKEN no Streamlit."
+        "HUBSPOT_TOKEN não encontrado. Diagnóstico: " + " | ".join(diag) + ". "
+        "No Streamlit Cloud: Settings → Secrets, cole exatamente:\n"
+        'HUBSPOT_TOKEN = "pat-na1-seu-token-aqui"'
     )
 
 
