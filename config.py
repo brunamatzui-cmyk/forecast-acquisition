@@ -101,12 +101,20 @@ STAGE_BY_ID = {s[0]: (s[1], s[2]) for stages in STAGES.values() for s in stages}
 PROP_POTENCIAL = "share_vs_potencial_total"
 PROP_POTENCIAL_LABEL = "Potencial Mês (Total)"
 
+# Previsão de fechamento (NÃO usar closedate — esse é "Close Date", a data
+# real quando o deal fecha, que fica no passado/errada pra deals abertos).
+# previsao_de_fechamento (label "Previsão de Fechamento", tipo date) é a
+# previsão real — confirmado por probe_previsao.py em 2026-10-05: vem
+# populada onde closedate vem None, e traz datas futuras coerentes.
+PROP_PREVISAO = "previsao_de_fechamento"
+PROP_PREVISAO_LABEL = "Previsão de Fechamento"
+
 # Propriedades trazidas por deal na Search API.
 # hs_lastmodifieddate = atualização incremental (spec 4.4): nas rodadas
 # seguintes, buscar só deals modificados desde a última atualização.
 DEAL_PROPERTIES = [
     "dealname", "dealstage", "pipeline", "hubspot_owner_id",
-    "closedate", PROP_POTENCIAL, "hs_lastmodifieddate",
+    PROP_PREVISAO, PROP_POTENCIAL, "hs_lastmodifieddate",
 ]
 PROP_LASTMOD = "hs_lastmodifieddate"
 

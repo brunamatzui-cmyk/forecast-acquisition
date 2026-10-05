@@ -28,7 +28,7 @@ for d in completos:
     if d["atrasado"]:
         n_atras += 1
         if n_atras <= 5:
-            print(f"  {d['dealname'][:30]!r:32s} close={d['closedate']} "
+            print(f"  {d['dealname'][:30]!r:32s} prev={d['previsao_fechamento']} "
                   f"base={d['base_fechamento']} ativ={d['ativacao']} "
                   f"atraso={d['dias_atraso']}d")
 print(f"  ... total atrasados: {n_atras}\n")

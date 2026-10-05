@@ -169,7 +169,7 @@ def main():
             inc_rows = [{
                 "Nome do negócio": d["dealname"], "Pipeline": d["pipeline_label"],
                 "Etapa": _step_label(d), "Proprietário": d["owner_name"],
-                "Previsão de fechamento": fmt_data(d["closedate"]),
+                "Previsão de fechamento": fmt_data(d["previsao_fechamento"]),
                 "Potencial": fmt_int(d["potencial"]),
                 "Motivo": d.get("motivo_incompleto", "–"),
             } for d in incompletos]
@@ -189,11 +189,11 @@ def _sort_deals(sel, opt):
     if opt.startswith("Pipeline"):
         # pipeline, depois etapa 6->5->4, depois fechamento crescente
         sel.sort(key=lambda d: (d["pipeline_label"], -(d["step"] or 0),
-                                d["closedate"] or dt.date.max))
+                                d["previsao_fechamento"] or dt.date.max))
     elif opt == "Fechar. crescente":
-        sel.sort(key=lambda d: d["closedate"] or dt.date.max)
+        sel.sort(key=lambda d: d["previsao_fechamento"] or dt.date.max)
     elif opt == "Fechar. decrescente":
-        sel.sort(key=lambda d: d["closedate"] or dt.date.min, reverse=True)
+        sel.sort(key=lambda d: d["previsao_fechamento"] or dt.date.min, reverse=True)
     elif opt == "Potencial decrescente":
         sel.sort(key=lambda d: -(d["potencial"] or 0))
     elif opt == "Total 6m decrescente":
@@ -339,7 +339,7 @@ def _deal_row(d, meses, dark):
     # proprietário
     row.append(f'<td>{html.escape(d["owner_name"])}</td>')
     # fechamento (com destaque atrasado)
-    fech = fmt_data(d["closedate"])
+    fech = fmt_data(d["previsao_fechamento"])
     if atrasado:
         row.append(f'<td class="fc-atras">{fech}<span class="fc-atraso-tag">Atrasado {d["dias_atraso"]}d</span></td>')
     else:

@@ -149,7 +149,8 @@ def _build_deal(d, owners, plabel_default, hoje_date):
     owner_name = theme.owner_display_name(owner_full) if owner_full else "(sem proprietário)"
     stage_id = _val(p.get("dealstage"))
     step, stage_label = config.STAGE_BY_ID.get(stage_id, (None, str(stage_id)))
-    closedate = _parse_hs_date(_val(p.get("closedate")))
+    # Previsão de fechamento (NÃO closedate). Ver config.PROP_PREVISAO.
+    previsao = _parse_hs_date(_val(p.get(config.PROP_PREVISAO)))
     potencial = _parse_potencial(_val(p.get(config.PROP_POTENCIAL)))
     lastmod = _parse_hs_date(_val(p.get(config.PROP_LASTMOD)))
     pid = _val(p.get("pipeline"))
@@ -163,10 +164,10 @@ def _build_deal(d, owners, plabel_default, hoje_date):
         "pipeline_label": config.PIPELINES.get(pid, plabel_default),
         "owner_name": owner_name,
         "owner_full": owner_full or "",
-        "closedate": closedate,
+        "previsao_fechamento": previsao,
         "potencial": potencial,
         "lastmodified": lastmod,
-        "atrasado": bool(closedate and closedate < hoje_date and step in (4, 5, 6)),
+        "atrasado": bool(previsao and previsao < hoje_date and step in (4, 5, 6)),
     }
 
 

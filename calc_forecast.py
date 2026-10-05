@@ -156,7 +156,7 @@ def volume_por_mes(deal, meses, hoje):
     volumes = {m: 0.0 for m in meses}
 
     potencial = deal["potencial"]
-    closedate = deal["closedate"]
+    closedate = deal["previsao_fechamento"]
     if not potencial or potencial <= 0 or not closedate:
         return volumes, None, None, False, detalhes
 
@@ -211,7 +211,7 @@ def calcular_todos(deals, hoje=None):
     completos, incompletos = [], []
     for d in deals:
         tem_pot = d["potencial"] is not None and d["potencial"] > 0
-        tem_close = d["closedate"] is not None
+        tem_close = d["previsao_fechamento"] is not None
         if not (tem_pot and tem_close):
             incompletos.append({**d, "ativacao": None, "base_fechamento": None,
                                 "atrasado": False, "volumes": {m: 0.0 for m in meses},
@@ -223,13 +223,13 @@ def calcular_todos(deals, hoje=None):
         completos.append({**d, "ativacao": ativ, "base_fechamento": base,
                           "atrasado": atrasado, "volumes": vols, "detalhes": det,
                           "total_linha": total_linha,
-                          "dias_atraso": dias_atraso(d["closedate"], hoje) if atrasado else 0})
+                          "dias_atraso": dias_atraso(d["previsao_fechamento"], hoje) if atrasado else 0})
     return completos, incompletos, meses
 
 
 def _motivo_incompleto(d):
     faltam = []
-    if not d.get("closedate"):
+    if not d.get("previsao_fechamento"):
         faltam.append("previsão de fechamento")
     if not (d.get("potencial") and d["potencial"] > 0):
         faltam.append("potencial mês")
