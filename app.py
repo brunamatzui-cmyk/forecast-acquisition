@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Dashboard de Forecast de Aquisição — v2 (spec 2026-10-01).
+"""Dashboard de Forecast de Aquisição — v2 (spec 2026-10-15).
 
-Clientes em negociação que AINDA NÃO assinaram contrato (etapas 4/5/6 dos
-pipelines B2B Outbound, Website Table, CSM Acquisition). Três camadas
-independentes (spec 4.1): coleta (fetch_hubspot) → cálculo (calc_forecast) →
-renderização (aqui). Filtros/ordenação só mexem aqui.
+Três abas:
+  1. Negociação — deals nas etapas 4/5/6 (ainda não assinaram).
+  2. Ativação   — deals na etapa 7 Ativação (rampa desde o closedate).
+  3. Consolidado — soma das duas + gráfico empilhado + KPI 6 meses.
+
+Três camadas independentes (spec 4.1): coleta (fetch_hubspot) → cálculo
+(calc_forecast) → renderização (aqui). Filtros/ordenação só mexem aqui.
+
+Mudanças v2: (A) filtros sidebar, (B) ordenação por clique via st.dataframe
+nativo (valores numéricos reais, não texto), (C) visual mais limpo, (D) aba
+Ativação. A linha TOTAL fica num dataframe separado (não ordenável).
 
 Rodar:  streamlit run app.py
 Token:  env HUBSPOT_TOKEN ou secret HUBSPOT_TOKEN no Streamlit Cloud.
 """
 import datetime as dt
-import html
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -44,26 +50,32 @@ def fmt_data(d):
     return d.strftime("%d/%m/%Y")
 
 
+def mes_label(m):
+    """out/26, nov/26..."""
+    nomes = ["jan", "fev", "mar", "abr", "mai", "jun",
+             "jul", "ago", "set", "out", "nov", "dez"]
+    return f"{nomes[m.month - 1]}/{str(m.year)[-2:]}"
+
+
 # ---- camadas 1+2 (cache) -------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def _load_full():
     """Carga COMPLETA: fetch + cálculo. Cache de 15 min."""
     deals, owners, fetched_at = fh.fetch_deals(log=lambda *a, **k: None)
     hoje = dt.date.today()
-    completos, incompletos, meses = cf.calcular_todos(deals, hoje=hoje)
-    return completos, incompletos, meses, fetched_at, hoje, deals
+    neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=hoje)
+    return neg, ativ, inc, meses, fetched_at, hoje, deals
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _load_incremental(last_fetched_iso):
     """Carga incremental: só deals modificados desde last_fetched, mesclados.
-    Na prática, para simplicidade e robustez (e porque o conjunto é pequeno,
-    ~66 deals), faz um refresh leve mas confirma elegíveis (remove quem saiu
-    de 4/5/6). Spec 4.4."""
+    Na prática, para simplicidade e robustez (conjunto pequeno), faz um refresh
+    leve mas confirma elegíveis (remove quem saiu de 4/5/6/7). Spec 4.4."""
     deals, owners, fetched_at = fh.fetch_deals(log=lambda *a, **k: None)
     hoje = dt.date.today()
-    completos, incompletos, meses = cf.calcular_todos(deals, hoje=hoje)
-    return completos, incompletos, meses, fetched_at, hoje, deals
+    neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=hoje)
+    return neg, ativ, inc, meses, fetched_at, hoje, deals
 
 
 def get_data():
@@ -77,23 +89,20 @@ def main():
     st.set_page_config(page_title="Forecast de Aquisição", layout="wide",
                        initial_sidebar_state="expanded")
 
-    # injeta CSS (sticky total, heatmap, zebra, scroll, tooltips)
+    # CSS mínimo: visual limpo (spec C). Sem bordas pesadas, espaçamento uniforme.
     st.markdown(_CSS(), unsafe_allow_html=True)
 
-    st.title("Forecast de Aquisição — Clientes em Negociação")
+    st.title("Forecast de Aquisição")
     st.caption(
-        "Deals nas etapas **4. Solução / 5. Negociação / 6. Fechamento** "
-        "dos pipelines B2B Outbound, Website Table e CSM Acquisition. "
-        "Volume de corridas previsto por mês (rampagem: M1 proporcional por dia)."
+        "Deals em **Negociação** (etapas 4/5/6) e **Ativação** (etapa 7) dos "
+        "pipelines B2B Outbound, Website Table e CSM Acquisition. "
+        "Volume de corridas previsto por mês (rampagem)."
     )
 
-    completos, incompletos, meses, fetched_at, hoje, fetched_deals = get_data()
-
-    # ---- legend (spec 3.4) ----
-    st.markdown(_legend_html(), unsafe_allow_html=True)
+    neg, ativ, inc, meses, fetched_at, hoje, fetched_deals = get_data()
 
     # ---- self-check (spec 5) ---- roda antes de exibir
-    checks = sc.run(completos, incompletos, meses, fetched_deals, hoje)
+    checks = sc.run(neg, ativ, inc, meses, fetched_deals, hoje)
     st.markdown(f"**Verificação:** {sc.summary(checks)}")
     with st.expander("Verificação dos dados (detalhado)", expanded=False):
         for cid, status, msg, deals_inv in checks:
@@ -103,16 +112,24 @@ def main():
                          + (f" … (+{len(deals_inv)-5})" if len(deals_inv) > 5 else "")
                          if deals_inv else ""))
 
-    # ---- filtros (spec 3.7) — só camada 3 ----
-    todos_owners = sorted({d["owner_name"] for d in completos if d["owner_name"] != "(sem proprietário)"})
-    todos_pipes = sorted({d["pipeline_label"] for d in completos})
-    todos_steps = sorted({d["step"] for d in completos if d["step"]})
+    # ---- filtros (spec A) — só camada 3, sobre o cache ----
+    todos_deals = neg + ativ
+    todos_owners = sorted({d["owner_name"] for d in todos_deals
+                           if d["owner_name"] != "(sem proprietário)"})
+    todos_pipes = sorted({d["pipeline_label"] for d in todos_deals})
+    # etapas 4/5/6 só pra aba Negociação
+    todos_steps = sorted({d["step"] for d in neg if d["step"]})
 
     with st.sidebar:
         st.header("Filtros")
-        f_owner = st.multiselect("Proprietário", todos_owners)
-        f_pipe = st.multiselect("Pipeline", todos_pipes)
-        f_step = st.multiselect("Etapa", [f"Etapa {s}" for s in todos_steps])
+        f_pipe = st.multiselect("Pipeline", todos_pipes, key="f_pipe")
+        f_owner = st.multiselect("Proprietário", todos_owners, key="f_owner")
+        f_step = st.multiselect("Etapa (só Negociação)",
+                                [f"Etapa {s}" for s in todos_steps], key="f_step")
+        if st.button("🧹 Limpar filtros"):
+            for k in ("f_pipe", "f_owner", "f_step"):
+                st.session_state.pop(k, None)
+            st.rerun()
         st.divider()
         col_btn1, col_btn2 = st.columns(2)
         if col_btn1.button("🔄 Atualizar agora", help="Atualização incremental (spec 4.4)"):
@@ -123,81 +140,211 @@ def main():
             st.session_state.pop("fc_data", None)
             st.rerun()
         st.divider()
-        sort_opt = st.selectbox("Ordenar por", [
-            "Pipeline → Etapa (6,5,4) → Fechamento", "Fechar. crescente",
-            "Fechar. decrescente", "Potencial decrescente", "Total 6m decrescente",
-        ])
+        st.session_state.fc_agrupar = st.checkbox(
+            "Agrupar por pipeline", value=False,
+            help="Quando desligado (padrão), a ordenação por clique é global.")
         st.session_state.fc_dark = st.checkbox("Modo escuro", value=False)
 
-    sel = completos
-    if f_owner:
-        sel = [d for d in sel if d["owner_name"] in f_owner]
-    if f_pipe:
-        sel = [d for d in sel if d["pipeline_label"] in f_pipe]
+    dark = st.session_state.get("fc_dark", False)
+    agrupar = st.session_state.get("fc_agrupar", False)
+
+    def aplica_filtros(lista):
+        sel = list(lista)
+        if f_pipe:
+            sel = [d for d in sel if d["pipeline_label"] in f_pipe]
+        if f_owner:
+            sel = [d for d in sel if d["owner_name"] in f_owner]
+        return sel
+
+    neg_sel = aplica_filtros(neg)
     if f_step:
         nums = [int(s.split()[-1]) for s in f_step]
-        sel = [d for d in sel if d["step"] in nums]
+        neg_sel = [d for d in neg_sel if d["step"] in nums]
+    ativ_sel = aplica_filtros(ativ)
 
-    _sort_deals(sel, sort_opt)
+    # ordenação padrão (quando nada clicado): pipeline > etapa (6,5,4) > fechamento
+    _sort_padrao(neg_sel)
+    _sort_padrao(ativ_sel)
 
-    n_atrasados = sum(1 for d in sel if d["atrasado"])
-    total_6m = sum(d["total_linha"] for d in sel)
-    pot_total = sum((d["potencial"] or 0) for d in sel)
+    # ---- abas ----
+    tab_neg, tab_ativ, tab_cons = st.tabs(["Negociação", "Ativação", "Consolidado"])
 
-    # ---- KPI row (spec 3.9) ----
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Total corridas (6 meses)", fmt_int(total_6m))
-    k2.metric("Deals no forecast", len(sel))
-    k3.metric("Potencial total", fmt_int(pot_total))
-    k4.metric("Deals atrasados", n_atrasados)
-    k5.metric("Deals incompletos", len(incompletos))
-
-    # ---- gráfico de barras empilhadas (spec 3.9) ----
-    st.markdown("#### Curva de forecast por mês (por pipeline)")
-    st.plotly_chart(_stacked_bar(sel, meses), use_container_width=True, config={"displayModeBar": False})
-
-    # ---- tabela principal (HTML custom p/ heatmap + sticky + cor) ----
-    st.markdown("#### Tabela de forecast")
-    st.markdown(f"_Mostrando **{len(sel)}** deals. Totais recalculam com os filtros. "
-                f"Última atualização: {fetched_at.strftime('%d/%m/%Y %H:%M')}._")
-    st.markdown(_table_html(sel, meses, st.session_state.get("fc_dark", False)),
-                unsafe_allow_html=True)
-
-    # ---- incompletos (spec: exceções) ----
-    if incompletos:
-        with st.expander(f"⚠️ Deals com dados incompletos ({len(incompletos)}) — fora dos totais"):
-            inc_rows = [{
-                "Nome do negócio": d["dealname"], "Pipeline": d["pipeline_label"],
-                "Etapa": _step_label(d), "Proprietário": d["owner_name"],
-                "Previsão de fechamento": fmt_data(d["previsao_fechamento"]),
-                "Potencial": fmt_int(d["potencial"]),
-                "Motivo": d.get("motivo_incompleto", "–"),
-            } for d in incompletos]
-            st.dataframe(pd.DataFrame(inc_rows), width="stretch", hide_index=True)
+    with tab_neg:
+        _render_negociacao(neg_sel, inc, meses, fetched_at, dark, agrupar)
+    with tab_ativ:
+        _render_ativacao(ativ_sel, inc, meses, fetched_at, dark, agrupar)
+    with tab_cons:
+        _render_consolidado(neg_sel, ativ_sel, meses, dark)
 
     st.caption(
-        f"Fonte: HubSpot (pipelines B2B Outbound/Website Table/CSM Acquisition; "
-        f"etapas 4/5/6). Potencial: `{config.PROP_POTENCIAL}` "
-        f"({config.PROP_POTENCIAL_LABEL}). Ativação = fechamento + 5 dias úteis "
-        f"(feriados nacionais BR). Atrasados: fechamento+1m como nova base. "
-        f"Probabilidade 100% (não pondera etapa)."
+        f"Fonte: HubSpot (pipelines B2B Outbound/Website Table/CSM Acquisition). "
+        f"Potencial: `{config.PROP_POTENCIAL_LABEL}`. "
+        f"Negociação: ativação = fechamento + 5 dias úteis (feriados BR). "
+        f"Ativação: rampa desde o fechamento real (`closedate`). "
+        f"Curva <20k: 25/50/100 · ≥20k: 25/50/75/100. "
+        f"Probabilidade 100% (não pondera etapa). "
+        f"Última atualização: {fetched_at.strftime('%d/%m/%Y %H:%M')}."
     )
 
 
-# ---- helpers de ordenação ----
-def _sort_deals(sel, opt):
-    if opt.startswith("Pipeline"):
-        # pipeline, depois etapa 6->5->4, depois fechamento crescente
-        sel.sort(key=lambda d: (d["pipeline_label"], -(d["step"] or 0),
-                                d["previsao_fechamento"] or dt.date.max))
-    elif opt == "Fechar. crescente":
-        sel.sort(key=lambda d: d["previsao_fechamento"] or dt.date.max)
-    elif opt == "Fechar. decrescente":
-        sel.sort(key=lambda d: d["previsao_fechamento"] or dt.date.min, reverse=True)
-    elif opt == "Potencial decrescente":
-        sel.sort(key=lambda d: -(d["potencial"] or 0))
-    elif opt == "Total 6m decrescente":
-        sel.sort(key=lambda d: -d["total_linha"])
+# ---- ordenação padrão (spec B: pipeline > etapa 6,5,4 > fechamento) ------
+def _sort_padrao(sel):
+    sel.sort(key=lambda d: (d["pipeline_label"], -(d["step"] or 0),
+                            d.get("previsao_fechamento") or dt.date.max))
+
+
+# ---- renderização: Negociação -------------------------------------------
+def _render_negociacao(sel, incompletos, meses, fetched_at, dark, agrupar):
+    inc_neg = [d for d in incompletos if d.get("origem", "negociacao") == "negociacao"]
+    total_6m = sum(d["total_linha"] for d in sel)
+    pot_total = sum((d["potencial"] or 0) for d in sel)
+    n_atrasados = sum(1 for d in sel if d["atrasado"])
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total corridas (6 meses)", fmt_int(total_6m))
+    k2.metric("Deals", len(sel))
+    k3.metric("Potencial total", fmt_int(pot_total))
+    k4.metric("Atrasados", n_atrasados)
+    k5.metric("Incompletos", len(inc_neg))
+
+    st.markdown(f"_Mostrando **{len(sel)}** deals. Última atualização: "
+                f"{fetched_at.strftime('%d/%m/%Y %H:%M')}._")
+
+    df = _df_negociacao(sel, meses)
+    _linha_total(df, meses, label="TOTAL")
+    _tabela_principal(df, meses, dark, agrupar, aba="negociacao")
+    _linha_total(df, meses, label="TOTAL")
+
+    _incompletos_expander(inc_neg, aba="negociacao")
+
+
+def _render_ativacao(sel, incompletos, meses, fetched_at, dark, agrupar):
+    inc_ativ = [d for d in incompletos if d.get("origem", "negociacao") == "ativacao"]
+    total_6m = sum(d["total_linha"] for d in sel)
+    pot_total = sum((d["potencial"] or 0) for d in sel)
+    # inconsistências: > 90 dias em ativação e ainda abaixo de 100% (spec D.3)
+    inconst = [d for d in sel if (d.get("dias_ativacao") or 0) > 90
+               and d["total_linha"] < (d["potencial"] or 0) * 6 - 1]
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total corridas (6 meses)", fmt_int(total_6m))
+    k2.metric("Deals em ativação", len(sel))
+    k3.metric("Potencial total", fmt_int(pot_total))
+    k4.metric("Inconsistentes (>90d <100%)", len(inconst))
+    k5.metric("Incompletos", len(inc_ativ))
+
+    st.markdown(f"_Mostrando **{len(sel)}** deals em ativação. Última atualização: "
+                f"{fetched_at.strftime('%d/%m/%Y %H:%M')}._")
+
+    df = _df_ativacao(sel, meses)
+    _linha_total(df, meses, label="TOTAL")
+    _tabela_principal(df, meses, dark, agrupar, aba="ativacao")
+    _linha_total(df, meses, label="TOTAL")
+
+    _incompletos_expander(inc_ativ, aba="ativacao")
+
+
+def _render_consolidado(neg_sel, ativ_sel, meses, dark):
+    total_6m = sum(d["total_linha"] for d in neg_sel) + sum(d["total_linha"] for d in ativ_sel)
+    n_neg = len(neg_sel); n_ativ = len(ativ_sel)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total corridas (6 meses)", fmt_int(total_6m))
+    k2.metric("Deals em negociação", n_neg)
+    k3.metric("Deals em ativação", n_ativ)
+
+    st.markdown("#### Curva de forecast por mês (Negociação vs. Ativação)")
+    st.plotly_chart(_stacked_bar_consolidado(neg_sel, ativ_sel, meses),
+                    use_container_width=True, config={"displayModeBar": False})
+
+    st.markdown("#### Tabela consolidada por mês")
+    # tabela mês x (Negociação, Ativação, Total)
+    rows = []
+    for m in meses:
+        vn = sum(d["volumes"].get(m, 0) for d in neg_sel)
+        va = sum(d["volumes"].get(m, 0) for d in ativ_sel)
+        rows.append({"Mês": mes_label(m), "Negociação": int(vn),
+                     "Ativação": int(va), "Total": int(vn + va)})
+    tot_vn = sum(r["Negociação"] for r in rows)
+    tot_va = sum(r["Ativação"] for r in rows)
+    rows.append({"Mês": "TOTAL 6 MESES", "Negociação": int(tot_vn),
+                 "Ativação": int(tot_va), "Total": int(tot_vn + tot_va)})
+    dfc = pd.DataFrame(rows)
+    cc = {"Negociação": st.column_config.NumberColumn(format="%d"),
+          "Ativação": st.column_config.NumberColumn(format="%d"),
+          "Total": st.column_config.NumberColumn(format="%d")}
+    st.dataframe(dfc, column_config=cc, use_container_width=True, hide_index=True)
+
+
+# ---- dataframes por aba --------------------------------------------------
+def _df_negociacao(sel, meses):
+    # Schema fixo (garante colunas + dtypes certos mesmo com sel vazio).
+    # Valores numéricos como int (spec B: nunca converter p/ texto — senão a
+    # ordenação por clique vira alfabética). Datas como date.
+    data = {
+        "Nome do negócio": [], "Pipeline": [], "Etapa": [], "Proprietário": [],
+        "Fechamento": [], "Ativação": [], "Potencial": [], "TOTAL 6M": [],
+    }
+    for m in meses:
+        data[mes_label(m)] = []
+    for d in sel:
+        data["Nome do negócio"].append(d["dealname"])
+        data["Pipeline"].append(d["pipeline_label"])
+        data["Etapa"].append(_step_label(d))
+        data["Proprietário"].append(d["owner_name"])
+        data["Fechamento"].append(d.get("previsao_fechamento"))
+        data["Ativação"].append(d.get("ativacao"))
+        data["Potencial"].append(int(d["potencial"] or 0))
+        data["TOTAL 6M"].append(int(d["total_linha"]))
+        for m in meses:
+            data[mes_label(m)].append(int(d["volumes"].get(m, 0)))
+    df = pd.DataFrame(data)
+    for m in meses:
+        df[mes_label(m)] = df[mes_label(m)].astype(int)
+    df["Potencial"] = df["Potencial"].astype(int)
+    df["TOTAL 6M"] = df["TOTAL 6M"].astype(int)
+    df["Fechamento"] = pd.to_datetime(df["Fechamento"], errors="coerce").dt.date
+    df["Ativação"] = pd.to_datetime(df["Ativação"], errors="coerce").dt.date
+    return df
+
+
+def _df_ativacao(sel, meses):
+    data = {
+        "Nome do negócio": [], "Pipeline": [], "Proprietário": [],
+        "Entrada na Ativação": [], "Dias em ativação": [],
+        "Potencial mês (total)": [], "% rampa mês atual": [],
+        "Corridas esperadas mês atual": [], "TOTAL 6M": [],
+    }
+    for m in meses:
+        data[mes_label(m)] = []
+    for d in sel:
+        data["Nome do negócio"].append(d["dealname"])
+        data["Pipeline"].append(d["pipeline_label"])
+        data["Proprietário"].append(d["owner_name"])
+        data["Entrada na Ativação"].append(d.get("entrada_ativacao"))
+        data["Dias em ativação"].append(int(d.get("dias_ativacao") or 0))
+        data["Potencial mês (total)"].append(int(d["potencial"] or 0))
+        data["% rampa mês atual"].append(_pct_rampa_atual(d, meses))
+        data["Corridas esperadas mês atual"].append(int(d["volumes"].get(meses[0], 0)))
+        data["TOTAL 6M"].append(int(d["total_linha"]))
+        for m in meses:
+            data[mes_label(m)].append(int(d["volumes"].get(m, 0)))
+    df = pd.DataFrame(data)
+    for m in meses:
+        df[mes_label(m)] = df[mes_label(m)].astype(int)
+    for c in ("Dias em ativação", "Potencial mês (total)", "% rampa mês atual",
+              "Corridas esperadas mês atual", "TOTAL 6M"):
+        df[c] = df[c].astype(int)
+    df["Entrada na Ativação"] = pd.to_datetime(df["Entrada na Ativação"], errors="coerce").dt.date
+    return df
+
+
+def _pct_rampa_atual(d, meses):
+    """% da rampa no mês atual (meses[0]) p/ coluna da aba Ativação."""
+    det = d.get("detalhes", {}).get(meses[0])
+    if not det or det.get("frac") is None:
+        return 0
+    return int(round(det["frac"] * 100))
 
 
 def _step_label(d):
@@ -205,184 +352,124 @@ def _step_label(d):
                               if ". " in d["stage_label"] else d["stage_label"])
 
 
-# ---- CSS ----
-def _CSS():
-    return """
-    <style>
-    .fc-table { width:100%; border-collapse:separate; border-spacing:0;
-        font-size:12px; font-variant-numeric: tabular-nums; }
-    .fc-table th, .fc-table td { padding:3px 6px; white-space:nowrap;
-        border-bottom:1px solid rgba(0,0,0,0.05); }
-    .fc-table thead th { position:sticky; top:0; background:#f0efe9; z-index:3;
-        font-weight:600; text-align:right; border-bottom:1px solid rgba(0,0,0,0.15); }
-    .fc-table th:first-child, .fc-table td:first-child { text-align:left;
-        position:sticky; left:0; z-index:2; background:inherit; }
-    .fc-table tbody tr:nth-child(even) td { background:rgba(0,0,0,0.018); }
-    .fc-table tbody tr:nth-child(even) td:first-child { background:#f7f6f1; }
-    .fc-total-row td { position:sticky; top:28px; z-index:4; background:#1b1b1a;
-        color:#fff; font-weight:700; font-size:13px; border-top:2px solid #000; }
-    .fc-total-row td:first-child { background:#1b1b1a; }
-    .fc-foot td { background:#e7e5dd; font-weight:700; border-top:2px solid #999; }
-    .fc-pipe-bar { display:inline-block; width:4px; height:14px; vertical-align:middle;
-        margin-right:6px; border-radius:2px; }
-    .fc-pipe-tag { font-size:9px; font-weight:700; padding:1px 4px; border-radius:3px;
-        color:#fff; margin-left:6px; vertical-align:middle; }
-    .fc-name { max-width:240px; overflow:hidden; text-overflow:ellipsis;
-        display:inline-block; vertical-align:middle; }
-    .fc-stage { font-size:10px; font-weight:600; padding:2px 6px; border-radius:8px;
-        color:#fff; white-space:nowrap; }
-    .fc-cell-zero { color:#aaa; text-align:right; }
-    .fc-cell { text-align:right; }
-    .fc-atraso { background:rgba(208,59,59,0.12); color:#d03b3b; font-weight:600; }
-    .fc-atraso-tag { font-size:9px; background:#d03b3b; color:#fff; padding:1px 4px;
-        border-radius:3px; margin-left:4px; }
-    .fc-total-col { font-weight:700; background:rgba(0,0,0,0.04); }
-    .fc-wrap { overflow:auto; max-height:70vh; border:1px solid rgba(0,0,0,0.08);
-        border-radius:6px; }
-    .fc-legend span { font-size:11px; margin-right:14px; }
-    .fc-dot { display:inline-block; width:10px; height:10px; border-radius:2px;
-        vertical-align:middle; margin-right:4px; }
-    </style>
-    """
-
-
-def _legend_html():
-    parts = ['<div class="fc-legend"><b>Pipelines:</b> ']
-    for label in ["B2B Outbound", "B2B Website Table", "B2B CSM Acquisition"]:
-        c = theme.PIPELINE_COLORS_LIGHT[label]
-        parts.append(f'<span><span class="fc-dot" style="background:{c}"></span>{label}</span>')
-    parts.append(' &nbsp;|&nbsp; <b>Etapas:</b> ')
-    for s, nome in [(4, "Solução"), (5, "Negociação"), (6, "Fechamento")]:
-        c = theme.STAGE_COLORS_LIGHT[s]
-        parts.append(f'<span><span class="fc-dot" style="background:{c}"></span>{s} · {nome}</span>')
-    parts.append(' &nbsp;|&nbsp; <span><span class="fc-dot" style="background:#d03b3b"></span>Atrasado</span>')
-    parts.append('</div>')
-    return "".join(parts)
-
-
-# ---- tabela HTML ----
-def _table_html(sel, meses, dark):
-    mes_labels = [m.strftime("%b/%y").capitalize() for m in meses]
-    # totais por coluna
-    tot_mes = {m: sum(d["volumes"].get(m, 0) for d in sel) for m in meses}
-    tot_6m = sum(d["total_linha"] for d in sel)
-
-    # cabeçalho
-    head = ['<div class="fc-wrap"><table class="fc-table"><thead><tr>']
-    head.append('<th>Nome do negócio</th><th>Etapa</th><th>Proprietário</th>'
-                '<th>Fechamento</th><th>Ativação</th><th>Potencial</th>'
-                '<th class="fc-total-col">TOTAL 6M</th>')
-    for m, lab in zip(meses, mes_labels):
-        head.append(f'<th>{lab}<br><span style="font-weight:400;font-size:10px">{fmt_int(tot_mes[m])}</span></th>')
-    head.append('</tr></thead>')
-
-    # linha TOTAL fixa (sticky) logo abaixo do cabeçalho
-    totrow = ['<tbody><tr class="fc-total-row"><td>TOTAL</td><td></td><td></td><td></td><td></td><td></td>']
-    totrow.append(f'<td>{fmt_int(tot_6m)}</td>')
+# ---- linha TOTAL fixa (separada, não ordenável) -------------------------
+def _linha_total(df, meses, label="TOTAL"):
+    """Exibe uma linha de totais alinhada às colunas, acima e abaixo da tabela.
+    Não participa da ordenação (spec B)."""
+    tot = {"Nome do negócio": label}
+    cols_num = ["Potencial", "Potencial mês (total)", "TOTAL 6M",
+                "Corridas esperadas mês atual", "Dias em ativação", "% rampa mês atual"]
+    for c in df.columns:
+        if c in cols_num:
+            tot[c] = int(df[c].sum()) if c in df.columns else 0
     for m in meses:
-        totrow.append(f'<td>{fmt_int(tot_mes[m])}</td>')
-    totrow.append('</tr>')
-
-    # corpo: agrupado por pipeline (cabeçalho de grupo + subtotal)
-    body = []
-    # agrupar preservando a ordem já sorted (que começa por pipeline se essa ordem)
-    by_pipe = {}
-    for d in sel:
-        by_pipe.setdefault(d["pipeline_label"], []).append(d)
-    # ordem dos grupos = ordem de primeira aparição em sel
-    seen = []
-    for d in sel:
-        if d["pipeline_label"] not in seen:
-            seen.append(d["pipeline_label"])
-
-    for plabel in seen:
-        grp = by_pipe[plabel]
-        c = theme.pipeline_color(plabel, dark)
-        sub_mes = {m: sum(d["volumes"].get(m, 0) for d in grp) for m in meses}
-        sub_6m = sum(d["total_linha"] for d in grp)
-        body.append(f'<tr><td colspan="7" style="background:rgba(0,0,0,0.03);font-weight:700">'
-                    f'<span class="fc-pipe-bar" style="background:{c}"></span>{html.escape(plabel)} '
-                    f'<span style="font-weight:400;color:#666">({len(grp)} deals)</span></td>')
-        for m in meses:
-            body.append(f'<td style="background:rgba(0,0,0,0.03);font-weight:600">{fmt_int(sub_mes[m])}</td>')
-        body.append('</tr>')
-        for d in grp:
-            body.append(_deal_row(d, meses, dark))
-
-    # rodapé (repete total)
-    foot = ['</tbody><tfoot><tr class="fc-foot"><td>TOTAL</td><td></td><td></td><td></td><td></td><td></td>']
-    foot.append(f'<td>{fmt_int(tot_6m)}</td>')
-    for m in meses:
-        foot.append(f'<td>{fmt_int(tot_mes[m])}</td>')
-    foot.append('</tr></tfoot></table></div>')
-    return "".join(head + totrow + body + foot)
+        lab = mes_label(m)
+        if lab in df.columns:
+            tot[lab] = int(df[lab].sum())
+    dft = pd.DataFrame([tot])
+    # formatar exibição: inteiros BR
+    cc = {}
+    for c in dft.columns:
+        if c in cols_num or mes_col_is_month(c, meses):
+            cc[c] = st.column_config.NumberColumn(c, format="%d")
+    st.dataframe(dft, column_config=cc, use_container_width=True,
+                 hide_index=True, height=68)
 
 
-def _deal_row(d, meses, dark):
-    c_pipe = theme.pipeline_color(d["pipeline_label"], dark)
-    c_stage = theme.stage_color(d["step"], dark)
-    short = theme.PIPELINE_SHORT.get(d["pipeline_label"], "")
-    name = html.escape(d["dealname"])
-    name_full = name.replace('"', '&quot;')
-    stage_nome = {4: "Solução", 5: "Negociação", 6: "Fechamento"}.get(d["step"], "")
-    atrasado = d["atrasado"]
+def mes_col_is_month(col, meses):
+    return col in [mes_label(m) for m in meses]
 
-    row = ['<tr>']
-    # nome com barra de cor + tag pipeline + tooltip nome completo
-    row.append(
-        f'<td><span class="fc-pipe-bar" style="background:{c_pipe}"></span>'
-        f'<span class="fc-name" title="{name_full}">{name}</span>'
-        f'<span class="fc-pipe-tag" style="background:{c_pipe}">{short}</span></td>'
-    )
-    # etapa badge
-    row.append(f'<td><span class="fc-stage" style="background:{c_stage}">{d["step"]} · {stage_nome}</span></td>')
-    # proprietário
-    row.append(f'<td>{html.escape(d["owner_name"])}</td>')
-    # fechamento (com destaque atrasado)
-    fech = fmt_data(d["previsao_fechamento"])
-    if atrasado:
-        row.append(f'<td class="fc-atras">{fech}<span class="fc-atraso-tag">Atrasado {d["dias_atraso"]}d</span></td>')
+
+# ---- tabela principal (st.dataframe nativo + heatmap + ordenação clique) -
+def _tabela_principal(df, meses, dark, agrupar, aba):
+    if df.empty:
+        st.info("Nenhum deal com os filtros atuais.")
+        return
+    # column_config: datas como DateColumn, números como NumberColumn,
+    # meses com BarColumn (heatmap de um único tom, intensidade proporcional).
+    cc = {}
+    if aba == "negociacao":
+        cc["Fechamento"] = st.column_config.DateColumn("Fechamento", format="DD/MM/YYYY")
+        cc["Ativação"] = st.column_config.DateColumn("Ativação", format="DD/MM/YYYY")
+        cc["Potencial"] = st.column_config.NumberColumn("Potencial", format="%d")
+        cc["TOTAL 6M"] = st.column_config.NumberColumn("TOTAL 6M", format="%d")
     else:
-        row.append(f'<td>{fech}</td>')
-    # ativação
-    row.append(f'<td>{fmt_data(d["ativacao"])}</td>')
-    # potencial
-    row.append(f'<td>{fmt_int(d["potencial"])}</td>')
-    # total 6m (coluna destacada)
-    row.append(f'<td class="fc-total-col">{fmt_int(d["total_linha"])}</td>')
-    # meses: valor limpo (sem heatmap) + tooltip de cálculo; zero => "–" cinza
+        cc["Entrada na Ativação"] = st.column_config.DateColumn("Entrada na Ativação", format="DD/MM/YYYY")
+        cc["Dias em ativação"] = st.column_config.NumberColumn("Dias em ativação", format="%d")
+        cc["Potencial mês (total)"] = st.column_config.NumberColumn("Potencial mês (total)", format="%d")
+        cc["% rampa mês atual"] = st.column_config.NumberColumn("% rampa mês atual", format="%d")
+        cc["Corridas esperadas mês atual"] = st.column_config.NumberColumn("Corridas esperadas mês atual", format="%d")
+        cc["TOTAL 6M"] = st.column_config.NumberColumn("TOTAL 6M", format="%d")
+    # meses como NumberColumn (inteiro visível + ordenável por clique, spec B).
+    # Nota: BarColumn não existe no Streamlit 1.61.1 ( só a partir de versões
+    # posteriores); ProgressColumn mostrar só a fração, não o valor bruto. A
+    # spec B (valores numéricos p/ ordenação) é hard e prevalece sobre o
+    # heatmap cosmético da spec C — por isso NumberColumn puro. O heatmap de
+    # um único tom pode ser readicionado via CSS quando subir p/ uma versão
+    # com BarColumn, sem mexer nos dados.
     for m in meses:
-        v = d["volumes"].get(m, 0)
-        det = d.get("detalhes", {}).get(m)
-        tip = html.escape(det["texto"]) if det and det["texto"] != "–" else ""
-        if v <= 0:
-            row.append(f'<td class="fc-cell-zero" title="{tip}">–</td>')
-        else:
-            row.append(f'<td class="fc-cell" title="{tip}">{fmt_int(v)}</td>')
-    row.append('</tr>')
-    return "".join(row)
+        lab = mes_label(m)
+        if lab in df.columns:
+            cc[lab] = st.column_config.NumberColumn(lab, format="%d",
+                help="Volume previsto de corridas neste mês (clique p/ ordenar).")
+    # Pipeline como coluna própria (chip de cor viria via CSS; spec C).
+    st.dataframe(df, column_config=cc, use_container_width=True,
+                 hide_index=True, on_select="ignore")
 
 
-# ---- gráfico empilhado (plotly) ----
-def _stacked_bar(sel, meses):
-    mes_labels = [m.strftime("%b/%y").capitalize() for m in meses]
+# ---- expander de incompletos --------------------------------------------
+def _incompletos_expander(incompletos, aba):
+    if not incompletos:
+        return
+    with st.expander(f"⚠️ Deals com dados incompletos ({len(incompletos)}) — fora dos totais"):
+        rows = [{
+            "Nome do negócio": d["dealname"], "Pipeline": d["pipeline_label"],
+            "Etapa": _step_label(d) if aba == "negociacao" else "7. Ativação",
+            "Proprietário": d["owner_name"],
+            "Fechamento": fmt_data(d.get("previsao_fechamento") if aba == "negociacao"
+                                   else d.get("closedate")),
+            "Potencial": fmt_int(d["potencial"]),
+            "Motivo": d.get("motivo_incompleto", "–"),
+        } for d in incompletos]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ---- gráfico empilhado Consolidado (Negociação vs Ativação) --------------
+def _stacked_bar_consolidado(neg_sel, ativ_sel, meses):
+    labels = [mes_label(m) for m in meses]
+    vn = [sum(d["volumes"].get(m, 0) for d in neg_sel) for m in meses]
+    va = [sum(d["volumes"].get(m, 0) for d in ativ_sel) for m in meses]
     fig = go.Figure()
-    for plabel in ["B2B Outbound", "B2B Website Table", "B2B CSM Acquisition"]:
-        vals = [sum(d["volumes"].get(m, 0) for d in sel if d["pipeline_label"] == plabel)
-                for m in meses]
-        fig.add_trace(go.Bar(
-            name=plabel, x=mes_labels, y=vals,
-            marker_color=theme.PIPELINE_COLORS_LIGHT[plabel],
-            hovertemplate="%{x}<br>" + plabel + ": %{y:,.0f}<extra></extra>",
-        ))
+    fig.add_trace(go.Bar(name="Negociação", x=labels, y=vn,
+                         marker_color=theme.PIPELINE_COLORS_LIGHT["B2B Outbound"],
+                         hovertemplate="%{x}<br>Negociação: %{y:,.0f}<extra></extra>"))
+    fig.add_trace(go.Bar(name="Ativação", x=labels, y=va,
+                         marker_color=theme.PIPELINE_COLORS_LIGHT["B2B CSM Acquisition"],
+                         hovertemplate="%{x}<br>Ativação: %{y:,.0f}<extra></extra>"))
     fig.update_layout(
-        barmode="stack", height=280, margin=dict(l=10, r=10, t=10, b=10),
+        barmode="stack", height=300, margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        font=dict(size=11), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(size=11), plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
         yaxis=dict(gridcolor="rgba(0,0,0,0.08)", tickformat=",.0f"),
         xaxis=dict(showgrid=False),
     )
     return fig
+
+
+# ---- CSS (visual limpo, spec C) -----------------------------------------
+def _CSS():
+    return """
+    <style>
+    /* dataframes compactos, sem bordas pesadas */
+    .stDataFrame { font-variant-numeric: tabular-nums; }
+    .stDataFrame td, .stDataFrame th { font-size: 12px; }
+    /* legenda de pipeline (chips discretos) */
+    .fc-legend span { font-size: 11px; margin-right: 14px; }
+    .fc-dot { display:inline-block; width:10px; height:10px; border-radius:50%;
+        vertical-align:middle; margin-right:4px; }
+    </style>
+    """
 
 
 if __name__ == "__main__":

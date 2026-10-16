@@ -87,11 +87,26 @@ STAGES = {
     ],
 }
 
-# Todos os stage_ids alvo (para o filtro IN da Search API).
-ALL_STAGE_IDS = [s[0] for stages in STAGES.values() for s in stages]
+# Stage da etapa 7 "Ativação" por pipeline (spec D.1 — aba Ativação).
+# Descoberto em 2026-10-15 pelo label exato (probe_ativacao.py).
+# (stage_id, step_number, stage_label)
+STAGES_ATIVACAO = {
+    "890800903": ("1342981415", 7, "7. Ativação"),
+    "917378965": ("1399082603", 7, "7. Ativação"),
+    "927024659": ("1420435115", 7, "7. Ativação"),
+}
+
+# Todos os stage_ids alvo: 4/5/6 (Negociação) + 7 Ativação. A aba Ativação
+# entra na MESMA consulta da Search API (filtro IN com todos os stages),
+# sem consulta extra por pipeline — spec "Desempenho".
+ALL_STAGE_IDS = ([s[0] for stages in STAGES.values() for s in stages]
+                 + [s[0] for s in STAGES_ATIVACAO.values()])
+ALL_ATIVACAO_STAGE_IDS = [s[0] for s in STAGES_ATIVACAO.values()]
 
 # Mapeamento stage_id -> (step, label) para resolver o que vier no deal.
+# Inclui 4/5/6 (Negociação) e 7 (Ativação).
 STAGE_BY_ID = {s[0]: (s[1], s[2]) for stages in STAGES.values() for s in stages}
+STAGE_BY_ID.update({s[0]: (s[1], s[2]) for s in STAGES_ATIVACAO.values()})
 
 # Propriedade de potencial confirmada por probe_potencial.py em 2026-10-01:
 # share_vs_potencial_total (label "Potencial Mês (Total)") é número absoluto
@@ -112,11 +127,16 @@ PROP_PREVISAO_LABEL = "Previsão de Fechamento"
 # Propriedades trazidas por deal na Search API.
 # hs_lastmodifieddate = atualização incremental (spec 4.4): nas rodadas
 # seguintes, buscar só deals modificados desde a última atualização.
+# closedate = data real de fechamento; usado como proxy da "data de entrada
+# na Ativação" (spec D.1). hs_date_entered_<stage_id> NÃO é retornável pela
+# CRM API v3 — ver probe_date_entered.py e a memória
+# forecast-ativacao-stage-discovery.
 DEAL_PROPERTIES = [
     "dealname", "dealstage", "pipeline", "hubspot_owner_id",
-    PROP_PREVISAO, PROP_POTENCIAL, "hs_lastmodifieddate",
+    PROP_PREVISAO, PROP_POTENCIAL, "closedate", "hs_lastmodifieddate",
 ]
 PROP_LASTMOD = "hs_lastmodifieddate"
+PROP_CLOSEDATE = "closedate"   # data real de fechamento (proxy entrada Ativação)
 
 # ---- Regras de cálculo (spec) --------------------------------------------
 DIAS_UTEIS_POS_FECHAMENTO = 5  # ativação = fechamento + 5 dias úteis

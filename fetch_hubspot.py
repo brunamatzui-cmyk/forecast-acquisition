@@ -152,6 +152,8 @@ def _build_deal(d, owners, plabel_default, hoje_date):
     # Previsão de fechamento (NÃO closedate). Ver config.PROP_PREVISAO.
     previsao = _parse_hs_date(_val(p.get(config.PROP_PREVISAO)))
     potencial = _parse_potencial(_val(p.get(config.PROP_POTENCIAL)))
+    # closedate = data real de fechamento; proxy da entrada na Ativação (D.1).
+    closedate = _parse_hs_date(_val(p.get(config.PROP_CLOSEDATE)))
     lastmod = _parse_hs_date(_val(p.get(config.PROP_LASTMOD)))
     pid = _val(p.get("pipeline"))
     return {
@@ -165,8 +167,10 @@ def _build_deal(d, owners, plabel_default, hoje_date):
         "owner_name": owner_name,
         "owner_full": owner_full or "",
         "previsao_fechamento": previsao,
+        "closedate": closedate,
         "potencial": potencial,
         "lastmodified": lastmod,
+        # atrasado só faz sentido para Negociação (4/5/6 com previsão no passado)
         "atrasado": bool(previsao and previsao < hoje_date and step in (4, 5, 6)),
     }
 
@@ -184,7 +188,11 @@ def fetch_deals(log=print, modified_since=None, hoje_date=None):
     log(f"Owners: {len(owners)} mapeados.")
 
     ms = int(modified_since.timestamp() * 1000) if modified_since else None
-    tasks = [(pid, plabel, [s[0] for s in config.STAGES[pid]], ms)
+    # Stage_ids por pipeline: 4/5/6 (Negociação) + 7 Ativação (spec D).
+    # A aba Ativação entra na mesma consulta (filtro IN), sem consulta extra.
+    tasks = [(pid, plabel,
+              [s[0] for s in config.STAGES[pid]]
+              + [config.STAGES_ATIVACAO[pid][0]], ms)
              for pid, plabel in config.PIPELINES.items()]
     deals = []
     with ThreadPoolExecutor(max_workers=3) as ex:
@@ -206,7 +214,8 @@ def fetch_eligible_ids(hoje_date=None):
         hoje_date = dt.date.today()
     ids = set()
     for pid, plabel in config.PIPELINES.items():
-        stage_ids = [s[0] for s in config.STAGES[pid]]
+        stage_ids = ([s[0] for s in config.STAGES[pid]]
+                     + [config.STAGES_ATIVACAO[pid][0]])
         body = {
             "filterGroups": [{"filters": [
                 {"value": pid, "propertyName": "pipeline", "operator": "EQ"},

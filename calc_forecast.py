@@ -199,38 +199,139 @@ def volume_por_mes(deal, meses, hoje):
     return volumes, ativacao, base, atrasado, detalhes
 
 
+# ---- Ativação (spec D.2) ------------------------------------------------
+# Rampa a partir da entrada na Ativação. O deal JÁ está em ativação, então:
+#   - início da rampa = closedate (data real de fechamento; proxy da entrada
+#     na Ativação, já que hs_date_entered_<id> não é retornável pela API —
+#     ver memória forecast-ativacao-stage-discovery).
+#   - SEM somar os 5 dias úteis (spec D.2 explicita: "o deal já está em
+#     ativação").
+# M1 = mês calendário do closedate, volume = potencial × 25% × (dias_ativos/
+# dias_no_mês). Mesma curva por potencial total (25/50/[75]/100 + carry).
+# Calcula-se a rampa DESDE o closedate, mas só se exibem os 6 meses da janela
+# atual (mês atual + 5). Deal que entrou há 3 meses já aparece em 100% hoje.
+def volume_por_mes_ativacao(deal, meses, hoje):
+    """Calcula volumes + metadados por mês da janela p/ um deal em Ativação.
+
+    Retorna (volumes, entrada, detalhes). entrada = closedate (início da rampa).
+    """
+    detalhes = {m: {"texto": "–", "rampa_idx": None, "frac": 0.0, "fator": None}
+                for m in meses}
+    volumes = {m: 0.0 for m in meses}
+
+    potencial = deal["potencial"]
+    entrada = deal.get("closedate")   # data real de fechamento
+    if not potencial or potencial <= 0 or not entrada:
+        return volumes, None, detalhes
+
+    curva = _curva(potencial)
+    fator_m1, dias_ativos, dias_no_mes = _fator_proporcional(entrada)
+    mes_m1 = dt.date(entrada.year, entrada.month, 1)
+
+    # Se o M1 (mês do closedate) está ANTES da janela, a rampa já começou no
+    # passado: descobrir qual offset da curva cai no primeiro mês da janela.
+    if mes_m1 not in volumes:
+        # calcular quantos meses separam o M1 do início da janela
+        delta_meses = (meses[0].year - mes_m1.year) * 12 + (meses[0].month - mes_m1.month)
+        if delta_meses < 0:
+            # closedate futuro além da janela -> nada a exibir ainda
+            return volumes, entrada, detalhes
+        idx_m1 = 0
+        offset_inicial = delta_meses   # já estamos offset meses adentro da rampa
+    else:
+        idx_m1 = meses.index(mes_m1)
+        offset_inicial = 0
+
+    for i in range(idx_m1, len(meses)):
+        offset = offset_inicial + (i - idx_m1)
+        mes = meses[i]
+        if offset < len(curva):
+            frac = curva[offset]
+            if offset == 0:
+                # M1 cai DENTRO da janela -> proporcional por dia
+                vol = potencial * frac * fator_m1
+                texto = (f"Mês 1 (entrada) · 25% de {potencial:,} × "
+                         f"{dias_ativos}/{dias_no_mes} (fator {fator_m1:.3f}) "
+                         f"= {int(round(vol)):,}")
+            else:
+                vol = potencial * frac
+                nome_mes = {1: "Mês 1", 2: "Mês 2", 3: "Mês 3",
+                            4: "Mês 4"}.get(offset + 1, f"Mês {offset+1}")
+                texto = f"{nome_mes} · {int(frac*100)}% de {potencial:,} = {int(round(vol)):,}"
+            volumes[mes] += vol
+            detalhes[mes] = {"texto": texto, "rampa_idx": offset, "frac": frac,
+                             "fator": fator_m1 if offset == 0 else None}
+        else:
+            vol = potencial * 1.0
+            texto = f"Mês {len(curva)+1}+ (100%) · 100% de {potencial:,} = {int(round(vol)):,}"
+            volumes[mes] += vol
+            detalhes[mes] = {"texto": texto, "rampa_idx": len(curva),
+                             "frac": 1.0, "fator": None}
+    return volumes, entrada, detalhes
+
+
+def dias_em_ativacao(closedate, hoje):
+    """Dias decorridos desde a entrada na Ativação (closedate). >=0."""
+    if not closedate:
+        return None
+    return max(0, (hoje - closedate).days)
+
+
 def calcular_todos(deals, hoje=None):
-    """Particiona completos/incompletos e calcula volumes + metadados.
+    """Particiona deals em (negociacao, ativacao, incompletos) e calcula volumes.
+
+    - negociacao: deals nas etapas 4/5/6 (rampa desde a ativação = fechamento+5dúteis).
+    - ativacao:   deals na etapa 7 Ativação (rampa desde o closedate, sem +5dúteis).
+    - incompletos: faltando potencial ou a data base da sua aba.
 
     Camada 2 (cálculo) — independente da renderização (spec 4.1).
+    Retorna (negociacao, ativacao, incompletos, meses).
     """
     if hoje is None:
         hoje = dt.date.today()
     meses = meses_janela(hoje)
 
-    completos, incompletos = [], []
+    negociacao, ativacao, incompletos = [], [], []
     for d in deals:
+        step = d.get("step")
+        eh_ativacao = step == 7
         tem_pot = d["potencial"] is not None and d["potencial"] > 0
-        tem_close = d["previsao_fechamento"] is not None
-        if not (tem_pot and tem_close):
+        # data base de cada aba: closedate p/ Ativação, previsao p/ Negociação
+        tem_data_base = (d.get("closedate") is not None) if eh_ativacao \
+            else (d.get("previsao_fechamento") is not None)
+        if not (tem_pot and tem_data_base):
             incompletos.append({**d, "ativacao": None, "base_fechamento": None,
                                 "atrasado": False, "volumes": {m: 0.0 for m in meses},
                                 "detalhes": {}, "total_linha": 0,
-                                "motivo_incompleto": _motivo_incompleto(d)})
+                                "origem": "ativacao" if eh_ativacao else "negociacao",
+                                "motivo_incompleto": _motivo_incompleto(d, eh_ativacao)})
             continue
-        vols, ativ, base, atrasado, det = volume_por_mes(d, meses, hoje)
-        total_linha = sum(vols.values())
-        completos.append({**d, "ativacao": ativ, "base_fechamento": base,
-                          "atrasado": atrasado, "volumes": vols, "detalhes": det,
-                          "total_linha": total_linha,
-                          "dias_atraso": dias_atraso(d["previsao_fechamento"], hoje) if atrasado else 0})
-    return completos, incompletos, meses
+        if eh_ativacao:
+            vols, entrada, det = volume_por_mes_ativacao(d, meses, hoje)
+            total_linha = sum(vols.values())
+            ativacao.append({**d, "entrada_ativacao": entrada,
+                             "ativacao": None, "base_fechamento": None,
+                             "atrasado": False, "volumes": vols, "detalhes": det,
+                             "total_linha": total_linha, "origem": "ativacao",
+                             "dias_ativacao": dias_em_ativacao(entrada, hoje)})
+        else:
+            vols, ativ, base, atrasado, det = volume_por_mes(d, meses, hoje)
+            total_linha = sum(vols.values())
+            negociacao.append({**d, "ativacao": ativ, "base_fechamento": base,
+                               "atrasado": atrasado, "volumes": vols, "detalhes": det,
+                               "total_linha": total_linha, "origem": "negociacao",
+                               "dias_atraso": dias_atraso(d["previsao_fechamento"], hoje) if atrasado else 0})
+    return negociacao, ativacao, incompletos, meses
 
 
-def _motivo_incompleto(d):
+def _motivo_incompleto(d, eh_ativacao=False):
     faltam = []
-    if not d.get("previsao_fechamento"):
-        faltam.append("previsão de fechamento")
+    if eh_ativacao:
+        if not d.get("closedate"):
+            faltam.append("data de fechamento (entrada na Ativação)")
+    else:
+        if not d.get("previsao_fechamento"):
+            faltam.append("previsão de fechamento")
     if not (d.get("potencial") and d["potencial"] > 0):
         faltam.append("potencial mês")
     return "Faltando: " + " e ".join(faltam)
@@ -275,3 +376,52 @@ def sanity_test_deals(hoje=None):
                      "m1": 30000*0.25*16/31, "m2": 15000, "m3": 22500, "m4+": 30000},
                     curva2, fator2, out2))
     return results
+
+
+def sanity_test_ativacao(hoje=None):
+    """Teste fictício da rampa de Ativação (spec D / verificação 5.9).
+
+    Constrói deals sintéticos e roda volume_por_mes_ativacao sobre a janela
+    real (mês atual + 5), validando:
+      - Deal que ENTROU agora (closedate = hoje): M1 proporcional por dia.
+      - Deal que entrou há 3 meses: já em 100% no mês atual (carry-forward).
+      - curva <20k vs ≥20k (3 vs 4 meses até 100%).
+
+    Retorna lista de (descricao, esperado, volumes_calculados_por_mes, ok).
+    """
+    if hoje is None:
+        hoje = dt.date.today()
+    meses = meses_janela(hoje)
+
+    def run(potencial, closedate):
+        d = {"potencial": potencial, "closedate": closedate, "step": 7,
+             "dealname": "fictício"}
+        vols, entrada, det = volume_por_mes_ativacao(d, meses, hoje)
+        return [vols[m] for m in meses], entrada
+
+    # dias no mês atual p/ o fator do M1
+    import calendar
+    dm_atual = calendar.monthrange(hoje.year, hoje.month)[1]
+    dias_ativos = dm_atual - hoje.day + 1
+    fator = dias_ativos / dm_atual
+
+    out = []
+    # 1) 10k entrando HOJE (no mês atual) -> M1 = 10000*0.25*fator, M2=5000, M3+=10000
+    v, _ = run(10000, hoje)
+    esp_m1 = 10000 * 0.25 * fator
+    out.append(("10k entrada hoje (mês atual)",
+                {"m1": esp_m1, "m2": 5000, "m3": 10000},
+                v, abs(v[0] - esp_m1) < 1 and abs(v[1] - 5000) < 1))
+    # 2) 10k entrou há 3 meses -> mês atual já em 100% (offset >= 2 => 100%)
+    tres_meses_atras = _add_meses(hoje, -3)
+    v2, _ = run(10000, tres_meses_atras)
+    # no mês atual (offset 3 desde a entrada) curva low=[25,50,100] => 100%
+    out.append(("10k entrada há 3 meses (100% hoje)",
+                {"m0": 10000}, v2, abs(v2[0] - 10000) < 1))
+    # 3) 30k entrando hoje -> curva 4 meses: M1=25%*fator, M2=15000, M3=22500, M4=30000
+    v3, _ = run(30000, hoje)
+    esp_m1b = 30000 * 0.25 * fator
+    out.append(("30k entrada hoje (curva 4 meses)",
+                {"m1": esp_m1b, "m2": 15000, "m3": 22500, "m4": 30000},
+                v3, abs(v3[0] - esp_m1b) < 1 and abs(v3[1] - 15000) < 1))
+    return out

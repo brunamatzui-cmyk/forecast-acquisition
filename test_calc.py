@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Teste do cálculo v2: fetch real + validação das regras (atrasado 2.1,
-proporcionalidade, curva, carry-forward, owner names, self-check, sanity).
-Roda com: PYTHONUTF8=1 python test_calc.py
+"""Teste do cálculo v2: fetch real + validação das regras de Negociação E
+Ativação (atrasado 2.1, proporcionalidade, curva, carry-forward, owner names,
+self-check, sanity de ambas as abas, duplicidade, consolidado).
+
+Roda com: PYTHONUTF8=1 HUBSPOT_TOKEN=... python test_calc.py
 """
 import datetime as dt
 
@@ -9,22 +11,22 @@ import fetch_hubspot as fh
 import calc_forecast as cf
 import selfcheck as sc
 
-HOJE = dt.date(2026, 10, 1)  # spec: usar a data atual real; fixo p/ teste reproduzível
+HOJE = dt.date(2026, 10, 15)  # data real; fixo p/ teste reproduzível
 
-print("Buscando deals (paralelo, 3 pipelines)...")
+print("Buscando deals (4/5/6 + 7 Ativação, paralelo)...")
 deals, owners, fetched_at = fh.fetch_deals(log=print)
 print(f"Total: {len(deals)} deals | fetched_at: {fetched_at.isoformat()}\n")
 
-completos, incompletos, meses = cf.calcular_todos(deals, hoje=HOJE)
-print(f"Completos: {len(completos)} | Incompletos: {len(incompletos)}")
+neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=HOJE)
+print(f"Negociacao: {len(neg)} | Ativacao: {len(ativ)} | Incompletos: {len(inc)}")
 print(f"Janela: {[m.strftime('%b/%y') for m in meses]}\n")
 
-# ---- regra 2.1 atrasados (NOVA) ----
+# ---- regra 2.1 atrasados (Negociação) ----
 print("=" * 70)
 print("ATRASADOS (regra 2.1: close+1m como base, +5dúteis):")
 print("=" * 70)
 n_atras = 0
-for d in completos:
+for d in neg:
     if d["atrasado"]:
         n_atras += 1
         if n_atras <= 5:
@@ -33,16 +35,38 @@ for d in completos:
                   f"atraso={d['dias_atraso']}d")
 print(f"  ... total atrasados: {n_atras}\n")
 
+# ---- ATIVAÇÃO (spec D) ----
+print("=" * 70)
+print("ATIVAÇÃO (rampa desde closedate, sem +5dúteis):")
+print("=" * 70)
+for d in ativ:
+    v = [int(d["volumes"][m]) for m in meses]
+    print(f"  {d['dealname'][:28]!r:30s} pipe={d['pipeline_label'][:18]:18s} "
+          f"closed={d['entrada_ativacao']} dias={d['dias_ativacao']} "
+          f"pot={d['potencial']} total6m={int(d['total_linha'])}")
+    print(f"     meses: {v}")
+print(f"  ... total em ativação: {len(ativ)}\n")
+
 # ---- owner names (primeiro+último) ----
 print("=" * 70)
 print("OWNER NAMES (primeiro nome + último sobrenome):")
 print("=" * 70)
-for d in completos[:6]:
+for d in (neg + ativ)[:6]:
     print(f"  full={d['owner_full']!r:40s} -> {d['owner_name']!r}")
 
-# ---- sanity test (spec 5.5) ----
+# ---- duplicidade entre abas ----
+print()
+print("=" * 70)
+print("DUPLICIDADE Negociação x Ativação (esperado 0):")
+print("=" * 70)
+ids_neg = {d["deal_id"] for d in neg}
+ids_ativ = {d["deal_id"] for d in ativ}
+dup = ids_neg & ids_ativ
+print(f"  {len(dup)} deal(s) em ambas as abas.")
+
+# ---- sanity test Negociação (spec 5.5) ----
 print("\n" + "=" * 70)
-print("SANITY TEST (deals fictícios):")
+print("SANITY TEST Negociação (deals fictícios):")
 print("=" * 70)
 for desc, esp, curva, fator, out in cf.sanity_test_deals(HOJE):
     print(f"  {desc}: curva={curva} fator={fator:.4f} (esp 16/31={16/31:.4f})")
@@ -55,20 +79,30 @@ for desc, esp, curva, fator, out in cf.sanity_test_deals(HOJE):
           f"M3={int(out[2]):,} (esp {int(esp_m3):,})")
     print(f"    -> {'OK' if ok else 'FALHOU'}")
 
+# ---- sanity test Ativação (spec 5.9) ----
+print("\n" + "=" * 70)
+print("SANITY TEST Ativação (deals fictícios):")
+print("=" * 70)
+for desc, esp, v, ok in cf.sanity_test_ativacao(hoje=HOJE):
+    print(f"  {desc}: {[int(x) for x in v]} -> {'OK' if ok else 'FALHOU'}")
+
 # ---- self-check ----
 print("\n" + "=" * 70)
 print("SELF-CHECK:")
 print("=" * 70)
-checks = sc.run(completos, incompletos, meses, deals, hoje=HOJE)
+checks = sc.run(neg, ativ, inc, meses, deals, hoje=HOJE)
 print(f"  {sc.summary(checks)}")
 for cid, st, msg, dl in checks:
     if st == "warn":
         print(f"  ⚠ [{cid}] {msg} ({len(dl)} deals)")
 
-# ---- total ----
+# ---- total consolidado ----
 print("\n" + "=" * 70)
-print("TOTAL por mês:")
+print("TOTAL por mês (Negociação + Ativação):")
 print("=" * 70)
 for m in meses:
-    print(f"  {m.strftime('%b/%y'):8s} {int(sum(d['volumes'][m] for d in completos)):>10,}")
-print(f"  {'TOTAL':8s} {int(sum(d['total_linha'] for d in completos)):>10,}")
+    tn = sum(d['volumes'][m] for d in neg)
+    ta = sum(d['volumes'][m] for d in ativ)
+    print(f"  {m.strftime('%b/%y'):8s} neg={int(tn):>10,} ativ={int(ta):>8,} soma={int(tn+ta):>10,}")
+tn6 = sum(d['total_linha'] for d in neg); ta6 = sum(d['total_linha'] for d in ativ)
+print(f"  {'TOTAL':8s} neg={int(tn6):>10,} ativ={int(ta6):>8,} soma={int(tn6+ta6):>10,}")

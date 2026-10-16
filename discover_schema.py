@@ -113,9 +113,49 @@ for name, lab, typ, ft in cands:
     print(f"    name={name!r:40s} label={lab!r:40s} type={typ} field={ft}")
 
 print("\n" + "=" * 70)
+print("4) Etapa de ATIVAÇÃO + prop hs_date_entered_<stage_id> (spec D.1)")
+print("=" * 70)
+# A aba Ativação (v2) precisa do stage "Ativação" de cada pipeline e da
+# propriedade hs_date_entered_<stage_id> (data em que o deal entrou na etapa).
+# NÃO assumir — descobrir pelo label, igual aos 4/5/6.
+ativacao = {}  # pipeline_label -> (stage_id, stage_label, prop_name, prop_ok)
+for pid, plabel in found.items():
+    print(f"\n  Pipeline {plabel!r} ({pid}):")
+    sr = hs_get(f"/crm/v3/pipelines/deals/{pid}/stages?archived=false")
+    atv = None
+    for s in sr.get("results", []):
+        slabel = s.get("label", "")
+        sid = s.get("id")
+        if "ativa" in slabel.lower():   # "Ativação" (aceita variações de acento/case)
+            atv = (sid, slabel)
+            print(f"    <-- ATIVAÇÃO: id={sid}  label={slabel!r}")
+    if atv is None:
+        print(f"    !! 'Ativação' não encontrada — lista de stages p/ inspeção:")
+        for s in sr.get("results", []):
+            print(f"       order={s.get('displayOrder'):>2}  id={s.get('id')}  label={s.get('label')!r}")
+        ativacao[plabel] = (None, None, None, False)
+        time.sleep(0.2)
+        continue
+    sid, slabel = atv
+    prop_name = f"hs_date_entered_{sid}"
+    in_list = any(p.get("name") == prop_name for p in props)
+    try:
+        pj = hs_get(f"/crm/v3/properties/deals/{prop_name}")
+        print(f"    prop {prop_name!r}: type={pj.get('type')}  "
+              f"label={pj.get('label')!r}  (no schema list: {in_list})")
+        prop_ok = True
+    except Exception as e:
+        print(f"    !! prop {prop_name!r} NÃO encontrada via GET "
+              f"({type(e).__name__}) — no schema list: {in_list}")
+        prop_ok = in_list
+    ativacao[plabel] = (sid, slabel, prop_name, prop_ok)
+    time.sleep(0.2)
+
+print("\n" + "=" * 70)
 print("RESUMO")
 print("=" * 70)
-out = {"pipelines": found, "stages": stage_ids, "potencial_candidates": cands}
+out = {"pipelines": found, "stages": stage_ids,
+       "potencial_candidates": cands, "ativacao": ativacao}
 print(json.dumps(out, ensure_ascii=False, indent=2))
 with open("_schema_discovered.json", "w", encoding="utf-8") as f:
     json.dump(out, f, ensure_ascii=False, indent=2)
