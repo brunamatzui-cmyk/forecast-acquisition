@@ -58,8 +58,12 @@ def mes_label(m):
 
 
 # ---- camadas 1+2 (cache) -------------------------------------------------
+# Funções nomeadas _v2 p/ invalidar caches obsoletos do deploy anterior: a
+# chave do st.cache_data inclui a identidade da função, então renomear busta
+# qualquer entrada antiga (o deploy pré-v2 cacheava um 6-tupla; o novo código
+# devolve 7 — desempacotar 7 de 6 levantava ValueError no Cloud).
 @st.cache_data(ttl=900, show_spinner=False)
-def _load_full():
+def _load_full_v2():
     """Carga COMPLETA: fetch + cálculo. Cache de 15 min."""
     deals, owners, fetched_at = fh.fetch_deals(log=lambda *a, **k: None)
     hoje = dt.date.today()
@@ -68,7 +72,7 @@ def _load_full():
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _load_incremental(last_fetched_iso):
+def _load_incremental_v2(last_fetched_iso):
     """Carga incremental: só deals modificados desde last_fetched, mesclados.
     Na prática, para simplicidade e robustez (conjunto pequeno), faz um refresh
     leve mas confirma elegíveis (remove quem saiu de 4/5/6/7). Spec 4.4."""
@@ -79,9 +83,13 @@ def _load_incremental(last_fetched_iso):
 
 
 def get_data():
-    """Garante a base no session_state; default = carga completa."""
+    """Garante a base no session_state; default = carga completa.
+    Limpa o cache uma vez por sessão (cinto de segurança p/ mudança de shape)."""
+    if not st.session_state.get("fc_cache_busted"):
+        st.cache_data.clear()
+        st.session_state.fc_cache_busted = True
     if "fc_data" not in st.session_state:
-        st.session_state.fc_data = _load_full()
+        st.session_state.fc_data = _load_full_v2()
     return st.session_state.fc_data
 
 
@@ -133,7 +141,7 @@ def main():
         st.divider()
         col_btn1, col_btn2 = st.columns(2)
         if col_btn1.button("🔄 Atualizar agora", help="Atualização incremental (spec 4.4)"):
-            st.session_state.fc_data = _load_incremental(fetched_at.isoformat())
+            st.session_state.fc_data = _load_incremental_v2(fetched_at.isoformat())
             st.rerun()
         if col_btn2.button("♻️ Recarregar tudo", help="Carga completa"):
             st.cache_data.clear()
