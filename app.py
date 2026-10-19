@@ -224,7 +224,7 @@ def _render_negociacao(sel, incompletos, meses, fetched_at, dark, agrupar):
     _tabela_principal(df, meses, dark, agrupar, aba="negociacao")
     _linha_total(df, meses, label="TOTAL")
 
-    _incompletos_expander(inc_neg, aba="negociacao")
+    _incompletos_expander(inc_neg, aba="negociacao", dark=dark)
 
 
 def _render_ativacao(sel, incompletos, meses, fetched_at, dark, agrupar):
@@ -250,7 +250,7 @@ def _render_ativacao(sel, incompletos, meses, fetched_at, dark, agrupar):
     _tabela_principal(df, meses, dark, agrupar, aba="ativacao")
     _linha_total(df, meses, label="TOTAL")
 
-    _incompletos_expander(inc_ativ, aba="ativacao")
+    _incompletos_expander(inc_ativ, aba="ativacao", dark=dark)
 
 
 def _render_consolidado(neg_sel, ativ_sel, meses, dark):
@@ -449,7 +449,7 @@ def _tabela_principal(df, meses, dark, agrupar, aba):
 
 
 # ---- expander de incompletos --------------------------------------------
-def _incompletos_expander(incompletos, aba):
+def _incompletos_expander(incompletos, aba, dark):
     if not incompletos:
         return
     with st.expander(f"⚠️ Deals com dados incompletos ({len(incompletos)}) — fora dos totais"):
