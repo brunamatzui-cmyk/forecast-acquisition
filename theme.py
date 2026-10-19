@@ -59,6 +59,13 @@ ATRASADO_LIGHT = "#d03b3b"
 ATRASADO_DARK  = "#e66767"
 ATRASADO_BG_LIGHT = "rgba(208,59,59,0.10)"   # fundo avermelhado suave na célula
 
+# ---- Zebra striping (linhas intercaladas) ----
+# Tint neutro da família do GRIDLINE/TOTAL_BG (cinza-quente), NÃO da família
+# azul do heatmap nem do vermelho de ATRASADO — propositadamente baixo
+# contraste c/ a superfície p/ que heatmap/status continuem dominantes.
+# Aplicado via pandas.Styler (pintado no canvas do st.dataframe em 1.61.1).
+ZEBRA_BG = {"light": "#f4f3ee", "dark": "#21211f"}
+
 # ---- Chrome / ink ----
 INK = {"light": "#0b0b0b", "dark": "#ffffff"}
 INK_SECONDARY = {"light": "#52514e", "dark": "#c3c2b7"}

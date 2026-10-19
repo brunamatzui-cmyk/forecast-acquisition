@@ -16,8 +16,9 @@ Acquisition. Fonte: HubSpot.
   alfabética. Linha TOTAL num bloco separado acima/abaixo (não ordenável).
 - **Nova aba Ativação**: rampa desde a data de entrada na Ativação (ver
   abaixo), sem somar os 5 dias úteis (o deal já está em ativação).
-- Visual mais limpo: sem barras/fundos coloridos por linha; cor só em chips
-  de pipeline e no gráfico.
+- Visual mais limpo: cor só em chips de pipeline e no gráfico. As tabelas
+  têm **zebra striping** (linhas intercaladas) via `pandas.Styler` pintado
+  no canvas do `st.dataframe` — mantém ordenação por clique e `column_config`.
 
 ## Rodar
 

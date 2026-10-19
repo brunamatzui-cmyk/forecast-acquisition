@@ -18,6 +18,7 @@ Token:  env HUBSPOT_TOKEN ou secret HUBSPOT_TOKEN no Streamlit Cloud.
 """
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -281,7 +282,8 @@ def _render_consolidado(neg_sel, ativ_sel, meses, dark):
     cc = {"Negociação": st.column_config.NumberColumn(format="%d"),
           "Ativação": st.column_config.NumberColumn(format="%d"),
           "Total": st.column_config.NumberColumn(format="%d")}
-    st.dataframe(dfc, column_config=cc, use_container_width=True, hide_index=True)
+    st.dataframe(_zebra_styler(dfc, dark), column_config=cc,
+                 use_container_width=True, hide_index=True)
 
 
 # ---- dataframes por aba --------------------------------------------------
@@ -388,6 +390,27 @@ def mes_col_is_month(col, meses):
     return col in [mes_label(m) for m in meses]
 
 
+# ---- zebra striping (pandas.Styler pintado no canvas do st.dataframe) -----
+# st.dataframe em 1.61.1 renderiza num <canvas> (Glide Data Grid), então CSS
+# em td/tr não pega o corpo. Passamos um pandas.Styler: o Streamlit extrai os
+# estilos de célula (_marshall_styles -> drawCell) e pinta no canvas, mantendo
+# ordenação por clique, column_config (datas/números BR) e heatmap futuro.
+# docstring arrow.py L651: column_config tem precedência sobre Styler p/ texto.
+def _zebra_styler(df, dark):
+    """Reveste df com fundo intercalado nas linhas pares (0-indexed: 1ª, 3ª, ...).
+    Devolve um pandas.Styler; células ímpares ficam vazias (cor da superfície)."""
+    if df.empty:
+        return df.style  # styler vazio: sem efeito, só mantém o shape
+    bg = theme.ZEBRA_BG["dark" if dark else "light"]
+    def _paint(_df):
+        # Estilo por linha (par -> bg, ímpar -> vazio) repetido p/ todas as cols.
+        per_row = np.where(np.arange(len(_df)) % 2 == 0,
+                           f"background-color: {bg}", "")
+        css = np.broadcast_to(per_row[:, None], _df.shape)
+        return pd.DataFrame(css, index=_df.index, columns=_df.columns)
+    return df.style.apply(_paint, axis=None)
+
+
 # ---- tabela principal (st.dataframe nativo + heatmap + ordenação clique) -
 def _tabela_principal(df, meses, dark, agrupar, aba):
     if df.empty:
@@ -421,8 +444,8 @@ def _tabela_principal(df, meses, dark, agrupar, aba):
             cc[lab] = st.column_config.NumberColumn(lab, format="%d",
                 help="Volume previsto de corridas neste mês (clique p/ ordenar).")
     # Pipeline como coluna própria (chip de cor viria via CSS; spec C).
-    st.dataframe(df, column_config=cc, use_container_width=True,
-                 hide_index=True, on_select="ignore")
+    st.dataframe(_zebra_styler(df, dark), column_config=cc,
+                 use_container_width=True, hide_index=True, on_select="ignore")
 
 
 # ---- expander de incompletos --------------------------------------------
@@ -439,7 +462,8 @@ def _incompletos_expander(incompletos, aba):
             "Potencial": fmt_int(d["potencial"]),
             "Motivo": d.get("motivo_incompleto", "–"),
         } for d in incompletos]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(_zebra_styler(pd.DataFrame(rows), dark),
+                     use_container_width=True, hide_index=True)
 
 
 # ---- gráfico empilhado Consolidado (Negociação vs Ativação) --------------
