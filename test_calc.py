@@ -86,6 +86,36 @@ print("=" * 70)
 for desc, esp, v, ok in cf.sanity_test_ativacao(hoje=HOJE):
     print(f"  {desc}: {[int(x) for x in v]} -> {'OK' if ok else 'FALHOU'}")
 
+# ---- sanity test Negociação Potencial atualizado (aba 15%) ----
+print("\n" + "=" * 70)
+print("SANITY TEST Negociação Potencial atualizado (15%):")
+print("=" * 70)
+for desc, esp, v, ok in cf.sanity_test_negociacao_15(HOJE):
+    print(f"  {desc}: {[int(x) for x in v]} -> {'OK' if ok else 'FALHOU'}")
+
+# ---- aba Negociação Potencial atualizado (forecast sobre 15%) ----
+print("\n" + "=" * 70)
+print("NEGOCIAÇÃO POTENCIAL ATUALIZADO (forecast sobre 15%):")
+print("=" * 70)
+neg_15 = cf.calcular_negociacao_15(neg, meses, HOJE)
+pot_orig = sum((d["potencial"] or 0) for d in neg_15)
+pot15 = sum(d["potencial_15"] for d in neg_15)
+print(f"  Deals: {len(neg_15)} | potencial original: {pot_orig:,} -> "
+      f"15%: {pot15:,} | total 6m: {int(sum(d['total_linha'] for d in neg_15)):,}")
+print("  (primeiros 8 deals: potencial -> 15% -> total6m -> meses)")
+for d in neg_15[:8]:
+    v = [int(d["volumes"][m]) for m in meses]
+    print(f"  {d['dealname'][:28]!r:30s} pot={d['potencial']:>7,} "
+          f"-> 15%={d['potencial_15']:>6,} total6m={int(d['total_linha']):>8,}")
+    print(f"     meses: {v}")
+print(f"  ... total deals 15%: {len(neg_15)}\n")
+print("  TOTAL por mês (aba 15%):")
+for m in meses:
+    t = sum(d["volumes"][m] for d in neg_15)
+    print(f"  {m.strftime('%b/%y'):8s} 15%={int(t):>10,}")
+t6 = sum(d["total_linha"] for d in neg_15)
+print(f"  {'TOTAL':8s} 15%={int(t6):>10,}")
+
 # ---- self-check ----
 print("\n" + "=" * 70)
 print("SELF-CHECK:")

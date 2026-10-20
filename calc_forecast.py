@@ -337,6 +337,45 @@ def _motivo_incompleto(d, eh_ativacao=False):
     return "Faltando: " + " e ".join(faltam)
 
 
+# ---- Negociação Potencial atualizado (aba: forecast sobre 15% do potencial) -
+# Mesma janela, mesma ativação (fechamento + 5dúteis), mesma proporcionalidade
+# de M1 por dia — só a BASE de volume muda: potencial_15 = round(potencial*0.15).
+# A curva (corte 20k) é REAVALIADA por potencial_15 (decisão de negócio): um
+# deal de 28k (curva 4 meses no original) vira 4.200 (curva 3 meses no 15%).
+# O potencial ORIGINAL é preservado em d["potencial"] p/ a coluna "Potencial";
+# o valor de 15% fica em d["potencial_15"]; volumes/total_linha são 15%-based.
+def calcular_negociacao_15(negociacao, meses, hoje):
+    """Variante de Negociação com forecast baseado em 15% do potencial.
+
+    Recebe a lista de negociacao já calculada (camada 2) e devolve uma lista
+    paralela, mesmo comprimento e mesma ordem, onde cada deal tem:
+      - potencial       = ORIGINAL (p/ coluna "Potencial")
+      - potencial_15    = round(potencial * 0.15) (p/ coluna "15% potencial")
+      - volumes          = forecast sobre potencial_15
+      - total_linha      = soma dos volumes 15%
+      - ativacao/base_fechamento/atrasado = recalculados (idênticos ao original,
+        pois dependem só de previsao_fechamento + feriados, não do potencial)
+    """
+    out = []
+    for d in negociacao:
+        pot_original = d["potencial"] or 0
+        pot15 = int(round(pot_original * 0.15))
+        # volume_por_mes lê deal["potencial"] + deal["previsao_fechamento"];
+        # sobrescrever potencial força a curva/_curva a usar pot15.
+        deal_15 = {**d, "potencial": pot15}
+        vols, ativ, base, atrasado, det = volume_por_mes(deal_15, meses, hoje)
+        total_linha = sum(vols.values())
+        out.append({**d,                      # preserva potencial ORIGINAL
+                    "potencial_15": pot15,
+                    "ativacao": ativ,
+                    "base_fechamento": base,
+                    "atrasado": atrasado,
+                    "volumes": vols,
+                    "detalhes": det,
+                    "total_linha": total_linha})
+    return out
+
+
 # ---- Teste de sanidade (spec 5.5) ---------------------------------------
 def sanity_test_deals(hoje=None):
     """Deals fictícios p/ validar a lógica (não entram nos totais).
@@ -424,4 +463,45 @@ def sanity_test_ativacao(hoje=None):
     out.append(("30k entrada hoje (curva 4 meses)",
                 {"m1": esp_m1b, "m2": 15000, "m3": 22500, "m4": 30000},
                 v3, abs(v3[0] - esp_m1b) < 1 and abs(v3[1] - 15000) < 1))
+    return out
+
+
+def sanity_test_negociacao_15(hoje=None):
+    """Valida a variante Negociação Potencial atualizado (forecast sobre 15%).
+
+    Cenários (deal fictício em Negociação, ativação = hoje + regra 2.1):
+      1) 10k original -> pot15=1.500 (<20k, curva 3 meses).
+         M1 = 1500*0.25*fator; M2 = 750; M3+ = 1500.
+      2) 30k original -> pot15=4.500 (<20k, curva REAVALIADA p/ 3 meses —
+         no original seria 4 meses). M1 = 4500*0.25*fator; M2 = 2250; M3+ = 4500.
+         Verifica que NÃO há 4ª fração 0.75 (confirmaria a reavaliação).
+
+    Retorna lista de (descricao, esperado, volumes, ok).
+    """
+    if hoje is None:
+        hoje = dt.date.today()
+    meses = meses_janela(hoje)
+    out = []
+    for pot_orig, esp_m2, esp_m3, label in [
+        (10000, 750, 1500, "10k -> 1.500 (curva 3m)"),
+        (30000, 2250, 4500, "30k -> 4.500 (curva REAVALIADA p/ 3m)"),
+    ]:
+        pot15 = int(round(pot_orig * 0.15))
+        # deal em Negociação: ativação = previsao_fechamento + 5dúteis.
+        # Forçamos previsao_fechamento = hoje (não atrasado) p/ ativação cair
+        # no mês atual e o M1 ser proporcional.
+        d = {"potencial": pot15, "previsao_fechamento": hoje,
+             "closedate": None, "dealname": "fictício"}
+        vols, ativ, base, atrasado, det = volume_por_mes(d, meses, hoje)
+        v = [vols[m] for m in meses]
+        # M1 esperado = pot15 * 0.25 * fator_do_dia_da_ativacao. A ativação é
+        # hoje+5dúteis; em vez de reproduzir o feriado, comparamos M2 e M3+ que
+        # não dependem do fator.
+        dm = calendar.monthrange(ativ.year, ativ.month)[1]
+        fator = (dm - ativ.day + 1) / dm
+        esp_m1 = pot15 * 0.25 * fator
+        ok = (abs(v[0] - esp_m1) < 2 and abs(v[1] - esp_m2) < 1
+              and abs(v[2] - esp_m3) < 1)
+        out.append((label, {"m1": esp_m1, "m2": esp_m2, "m3": esp_m3},
+                    v, ok))
     return out

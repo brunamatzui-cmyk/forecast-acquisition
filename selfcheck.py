@@ -223,6 +223,37 @@ def run(negociacao, ativacao, incompletos, meses, fetched_deals, hoje=None):
     else:
         checks.append(("5.9",) + _warn("Teste de sanidade da Ativação FALHOU — revisar volume_por_mes_ativacao."))
 
+    # ---- 5.10 Negociação Potencial atualizado (aba: forecast sobre 15%) ----
+    # Computa a variante aqui (cf já importado; negociacao/meses/hoje recebidos)
+    # — não exige mudar a assinatura de run(). Valida 3 invariantes:
+    #   (a) sanity test fictício da variante passa (curva reavaliada pelo 15%).
+    #   (b) potencial_15 == round(potencial*0.15) para cada deal.
+    #   (c) nenhum mês ultrapassa potencial_15 (espelha a verif. 5.3 do original).
+    san_15 = cf.sanity_test_negociacao_15(hoje)
+    san_15_ok = all(ok for _, _, _, ok in san_15)
+    if san_15_ok:
+        checks.append(("5.10",) + _ok("Sanity 15%: 10k->1.500 e 30k->4.500 (curva "
+                                      "reavaliada p/ 3 meses) ✓."))
+    else:
+        checks.append(("5.10",) + _warn("Sanity da variante 15% FALHOU — revisar "
+                                        "calcular_negociacao_15."))
+    neg_15 = cf.calcular_negociacao_15(negociacao, meses, hoje)
+    bad_pot15 = [d for d in neg_15
+                 if d["potencial_15"] != int(round((d["potencial"] or 0) * 0.15))]
+    if bad_pot15:
+        checks.append(("5.10",) + _warn(f"{len(bad_pot15)} deal(s) com potencial_15 "
+                                        "≠ round(potencial*0.15).", bad_pot15))
+    else:
+        checks.append(("5.10",) + _ok(f"potencial_15 = round(potencial*0.15) em todos "
+                                      f"os {len(neg_15)} deals."))
+    over_15 = [d for d in neg_15
+               if any(v > d["potencial_15"] + 1 for v in d["volumes"].values())]
+    if over_15:
+        checks.append(("5.10",) + _warn(f"{len(over_15)} deal(s) da aba 15% com mês "
+                                        "excedendo potencial_15.", over_15))
+    else:
+        checks.append(("5.10",) + _ok("Nenhum mês da aba 15% ultrapassa potencial_15."))
+
     return checks
 
 
