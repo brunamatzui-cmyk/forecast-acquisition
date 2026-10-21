@@ -69,7 +69,7 @@ def _load_full_v2():
     deals, owners, fetched_at = fh.fetch_deals(log=lambda *a, **k: None)
     hoje = dt.date.today()
     neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=hoje)
-    neg_15 = cf.calcular_negociacao_15(neg, meses, hoje)
+    neg_15 = cf._calc_negociacao_15_safe(neg, meses, hoje)
     return neg, ativ, inc, meses, fetched_at, hoje, deals, neg_15
 
 
@@ -81,7 +81,7 @@ def _load_incremental_v2(last_fetched_iso):
     deals, owners, fetched_at = fh.fetch_deals(log=lambda *a, **k: None)
     hoje = dt.date.today()
     neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=hoje)
-    neg_15 = cf.calcular_negociacao_15(neg, meses, hoje)
+    neg_15 = cf._calc_negociacao_15_safe(neg, meses, hoje)
     return neg, ativ, inc, meses, fetched_at, hoje, deals, neg_15
 
 

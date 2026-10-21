@@ -376,6 +376,46 @@ def calcular_negociacao_15(negociacao, meses, hoje):
     return out
 
 
+def _calc_negociacao_15_safe(negociacao, meses, hoje):
+    """Wrapper de diagnóstico para calcular_negociacao_15.
+
+    O Streamlit Cloud redacta a mensagem de exceção no traceback público ("to
+    prevent data leaks"), o que impede ver o erro real de produção. Este wrapper
+    captura a exceção, identifica o deal ofensor e re-lança com uma mensagem
+    DESCritiva (nome do deal + campos + tipo do erro original) — segura (sem
+    token) e legível no UI do Cloud.
+
+    Se tudo correr bem, é equivalente a calcular_negociacao_15.
+    """
+    try:
+        return calcular_negociacao_15(negociacao, meses, hoje)
+    except Exception as e:
+        # tenta achar qual deal quebra, iterando um a um
+        offenders = []
+        for d in negociacao:
+            try:
+                pot = d["potencial"] or 0
+                pot15 = int(round(pot * 0.15))
+                deal_15 = {**d, "potencial": pot15}
+                volume_por_mes(deal_15, meses, hoje)
+            except Exception as e2:
+                offenders.append(
+                    f"deal {d.get('dealname')!r} "
+                    f"(deal_id={d.get('deal_id')!r}, step={d.get('step')!r}, "
+                    f"potencial={d.get('potencial')!r}, "
+                    f"previsao_fechamento={d.get('previsao_fechamento')!r}, "
+                    f"closedate={d.get('closedate')!r}) -> "
+                    f"{type(e2).__name__}: {e2}")
+        msg = (f"[diag calcular_negociacao_15] erro original: "
+               f"{type(e).__name__}: {e}. ")
+        if offenders:
+            msg += "Deal(s) ofensor(es): " + " | ".join(offenders[:3])
+        else:
+            msg += ("Nenhum deal individual quebrou (erro coletivo ou na "
+                    "serialização/cache).")
+        raise RuntimeError(msg) from e
+
+
 # ---- Teste de sanidade (spec 5.5) ---------------------------------------
 def sanity_test_deals(hoje=None):
     """Deals fictícios p/ validar a lógica (não entram nos totais).
