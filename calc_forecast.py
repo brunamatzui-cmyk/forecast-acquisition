@@ -416,6 +416,72 @@ def _calc_negociacao_15_safe(negociacao, meses, hoje):
         raise RuntimeError(msg) from e
 
 
+# ---- Ativação Potencial Atualizado (aba: forecast sobre 15% do potencial) --
+# Espelha calcular_negociacao_15, mas usa volume_por_mes_ativacao (rampa desde
+# o closedate, sem +5dúteis, spec D.2). Mesma reavaliação de curva pelo pot15.
+def calcular_ativacao_15(ativacao, meses, hoje):
+    """Variante de Ativação com forecast baseado em 15% do potencial.
+
+    Mesma rampa desde o closedate (entrada na Ativação, SEM +5dúteis), mesma
+    proporcionalidade de M1 por dia e mesmo carry-forward de meses anteriores
+    à janela. Só a BASE de volume muda: potencial_15 = round(potencial*0.15).
+    Curva REAVALIADA por potencial_15 (corte 20k agora se aplica a potencial*0.15).
+    potencial ORIGINAL preservado em d["potencial"] p/ a coluna "Potencial mês
+    (total)"; dias_ativacao preservado (depende só do closedate, inalterado).
+    """
+    out = []
+    for d in ativacao:
+        pot_original = d["potencial"] or 0
+        pot15 = int(round(pot_original * 0.15))
+        # volume_por_mes_ativacao lê deal["potencial"] + deal["closedate"];
+        # sobrescrever potencial força a curva/_curva a usar pot15.
+        deal_15 = {**d, "potencial": pot15}
+        vols, entrada, det = volume_por_mes_ativacao(deal_15, meses, hoje)
+        total_linha = sum(vols.values())
+        out.append({**d,                      # preserva potencial ORIGINAL + dias_ativacao
+                    "potencial_15": pot15,
+                    "entrada_ativacao": entrada,
+                    "volumes": vols,
+                    "detalhes": det,
+                    "total_linha": total_linha})
+    return out
+
+
+def _calc_ativacao_15_safe(ativacao, meses, hoje):
+    """Wrapper de diagnóstico para calcular_ativacao_15 (espelha o de Negociação).
+
+    O Streamlit Cloud redacta a msg de exceção no traceback público; este
+    wrapper captura, acha o deal ofensor e re-lança RuntimeError com msg
+    DESCritiva (nome do deal + campos + tipo do erro original) — sem token,
+    legível no UI do Cloud. Em caminho feliz = idêntico a calcular_ativacao_15.
+    """
+    try:
+        return calcular_ativacao_15(ativacao, meses, hoje)
+    except Exception as e:
+        offenders = []
+        for d in ativacao:
+            try:
+                pot = d["potencial"] or 0
+                pot15 = int(round(pot * 0.15))
+                deal_15 = {**d, "potencial": pot15}
+                volume_por_mes_ativacao(deal_15, meses, hoje)
+            except Exception as e2:
+                offenders.append(
+                    f"deal {d.get('dealname')!r} "
+                    f"(deal_id={d.get('deal_id')!r}, step={d.get('step')!r}, "
+                    f"potencial={d.get('potencial')!r}, "
+                    f"closedate={d.get('closedate')!r}) -> "
+                    f"{type(e2).__name__}: {e2}")
+        msg = (f"[diag calcular_ativacao_15] erro original: "
+               f"{type(e).__name__}: {e}. ")
+        if offenders:
+            msg += "Deal(s) ofensor(es): " + " | ".join(offenders[:3])
+        else:
+            msg += ("Nenhum deal individual quebrou (erro coletivo ou na "
+                    "serialização/cache).")
+        raise RuntimeError(msg) from e
+
+
 # ---- Teste de sanidade (spec 5.5) ---------------------------------------
 def sanity_test_deals(hoje=None):
     """Deals fictícios p/ validar a lógica (não entram nos totais).

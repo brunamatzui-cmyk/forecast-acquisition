@@ -70,7 +70,8 @@ def _load_full_v2():
     hoje = dt.date.today()
     neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=hoje)
     neg_15 = cf._calc_negociacao_15_safe(neg, meses, hoje)
-    return neg, ativ, inc, meses, fetched_at, hoje, deals, neg_15
+    ativ_15 = cf._calc_ativacao_15_safe(ativ, meses, hoje)
+    return neg, ativ, inc, meses, fetched_at, hoje, deals, neg_15, ativ_15
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -82,7 +83,8 @@ def _load_incremental_v2(last_fetched_iso):
     hoje = dt.date.today()
     neg, ativ, inc, meses = cf.calcular_todos(deals, hoje=hoje)
     neg_15 = cf._calc_negociacao_15_safe(neg, meses, hoje)
-    return neg, ativ, inc, meses, fetched_at, hoje, deals, neg_15
+    ativ_15 = cf._calc_ativacao_15_safe(ativ, meses, hoje)
+    return neg, ativ, inc, meses, fetched_at, hoje, deals, neg_15, ativ_15
 
 
 def get_data():
@@ -110,7 +112,7 @@ def main():
         "Volume de corridas previsto por mês (rampagem)."
     )
 
-    neg, ativ, inc, meses, fetched_at, hoje, fetched_deals, neg_15 = get_data()
+    neg, ativ, inc, meses, fetched_at, hoje, fetched_deals, neg_15, ativ_15 = get_data()
 
     # ---- self-check (spec 5) ---- roda antes de exibir
     checks = sc.run(neg, ativ, inc, meses, fetched_deals, hoje)
@@ -177,15 +179,20 @@ def main():
     # neg_15 é paralelo a neg (mesma ordem), aplicamos os filtros sobre os
     # deal_ids que sobreviveram em neg_sel.
     neg_15_sel = _filtrar_paralelo(neg_15, neg_sel)
+    # Mesmo raciocínio p/ "Ativação Potencial Atualizado": ativ_15 é paralelo
+    # a ativ (mesma ordem), usamos os deal_ids que sobreviveram em ativ_sel.
+    ativ_15_sel = _filtrar_paralelo(ativ_15, ativ_sel)
 
     # ordenação padrão (quando nada clicado): pipeline > etapa (6,5,4) > fechamento
     _sort_padrao(neg_sel)
     _sort_padrao(ativ_sel)
     _sort_padrao(neg_15_sel)
+    _sort_padrao(ativ_15_sel)
 
     # ---- abas ----
-    tab_neg, tab_neg15, tab_ativ, tab_cons = st.tabs(
-        ["Negociação", "Negociação Potencial atualizado", "Ativação", "Consolidado"])
+    tab_neg, tab_neg15, tab_ativ, tab_ativ15, tab_cons = st.tabs(
+        ["Negociação", "Negociação Potencial atualizado", "Ativação",
+         "Ativação Potencial Atualizado", "Consolidado"])
 
     with tab_neg:
         _render_negociacao(neg_sel, inc, meses, fetched_at, dark, agrupar)
@@ -193,6 +200,8 @@ def main():
         _render_negociacao_15(neg_15_sel, inc, meses, fetched_at, dark, agrupar)
     with tab_ativ:
         _render_ativacao(ativ_sel, inc, meses, fetched_at, dark, agrupar)
+    with tab_ativ15:
+        _render_ativacao_15(ativ_15_sel, inc, meses, fetched_at, dark, agrupar)
     with tab_cons:
         _render_consolidado(neg_sel, ativ_sel, meses, dark)
 
@@ -303,6 +312,46 @@ def _render_ativacao(sel, incompletos, meses, fetched_at, dark, agrupar):
     df = _df_ativacao(sel, meses)
     _linha_total(df, meses, label="TOTAL")
     _tabela_principal(df, meses, dark, agrupar, aba="ativacao")
+    _linha_total(df, meses, label="TOTAL")
+
+    _incompletos_expander(inc_ativ, aba="ativacao", dark=dark)
+
+
+# ---- renderização: Ativação Potencial Atualizado (forecast sobre 15%) ------
+def _render_ativacao_15(sel, incompletos, meses, fetched_at, dark, agrupar):
+    """Mesma estrutura da aba Ativação, mas com a coluna "15% potencial" à
+    direita de "Potencial mês (total)" e o forecast (meses + TOTAL 6M) baseado
+    em 15%. "% rampa mês atual" é inalterada (fração da curva, independe do
+    potencial); "Corridas esperadas mês atual" e meses são 15%-based.
+
+    sel: lista de deals da variante calcular_ativacao_15 (potencial_15,
+         volumes/total_linha sobre 15%; potencial = ORIGINAL preservado;
+         dias_ativacao/entrada_ativacao preservados).
+    """
+    inc_ativ = [d for d in incompletos if d.get("origem", "negociacao") == "ativacao"]
+    total_6m = sum(d["total_linha"] for d in sel)
+    pot_15_total = sum((d["potencial_15"] or 0) for d in sel)
+    pot_total = sum((d["potencial"] or 0) for d in sel)
+    # inconsistências: > 90 dias em ativação e ainda abaixo de 100% (sobre pot15)
+    inconst = [d for d in sel if (d.get("dias_ativacao") or 0) > 90
+               and d["total_linha"] < (d["potencial_15"] or 0) * 6 - 1]
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total corridas (6 meses)", fmt_int(total_6m))
+    k2.metric("Deals em ativação", len(sel))
+    k3.metric("Potencial total (15%)", fmt_int(pot_15_total))
+    k4.metric("Inconsistentes (>90d <100%)", len(inconst))
+    k5.metric("Incompletos", len(inc_ativ))
+
+    st.markdown(
+        f"_Mostrando **{len(sel)}** deals em ativação com forecast baseado em "
+        f"**15% do potencial**. Potencial original: {fmt_int(pot_total)} → "
+        f"15%: {fmt_int(pot_15_total)}. Última atualização: "
+        f"{fetched_at.strftime('%d/%m/%Y %H:%M')}._")
+
+    df = _df_ativacao_15(sel, meses)
+    _linha_total(df, meses, label="TOTAL")
+    _tabela_principal(df, meses, dark, agrupar, aba="ativacao_15")
     _linha_total(df, meses, label="TOTAL")
 
     _incompletos_expander(inc_ativ, aba="ativacao", dark=dark)
@@ -441,6 +490,46 @@ def _df_ativacao(sel, meses):
     return df
 
 
+def _df_ativacao_15(sel, meses):
+    """DataFrame da aba "Ativação Potencial Atualizado".
+
+    Igual ao _df_ativacao, mas com a coluna "15% potencial" posicionada
+    entre "Potencial mês (total)" e "% rampa mês atual". "% rampa mês atual"
+    é inalterada (fração da curva); meses, "Corridas esperadas mês atual" e
+    TOTAL 6M refletem o forecast sobre 15%. "Potencial mês (total)" mostra
+    o valor ORIGINAL (preservado em d["potencial"]).
+    """
+    data = {
+        "Nome do negócio": [], "Pipeline": [], "Proprietário": [],
+        "Entrada na Ativação": [], "Dias em ativação": [],
+        "Potencial mês (total)": [], "15% potencial": [], "% rampa mês atual": [],
+        "Corridas esperadas mês atual": [], "TOTAL 6M": [],
+    }
+    for m in meses:
+        data[mes_label(m)] = []
+    for d in sel:
+        data["Nome do negócio"].append(d["dealname"])
+        data["Pipeline"].append(d["pipeline_label"])
+        data["Proprietário"].append(d["owner_name"])
+        data["Entrada na Ativação"].append(d.get("entrada_ativacao"))
+        data["Dias em ativação"].append(int(d.get("dias_ativacao") or 0))
+        data["Potencial mês (total)"].append(int(d["potencial"] or 0))
+        data["15% potencial"].append(int(d["potencial_15"] or 0))
+        data["% rampa mês atual"].append(_pct_rampa_atual(d, meses))
+        data["Corridas esperadas mês atual"].append(int(d["volumes"].get(meses[0], 0)))
+        data["TOTAL 6M"].append(int(d["total_linha"]))
+        for m in meses:
+            data[mes_label(m)].append(int(d["volumes"].get(m, 0)))
+    df = pd.DataFrame(data)
+    for m in meses:
+        df[mes_label(m)] = df[mes_label(m)].astype(int)
+    for c in ("Dias em ativação", "Potencial mês (total)", "15% potencial",
+              "% rampa mês atual", "Corridas esperadas mês atual", "TOTAL 6M"):
+        df[c] = df[c].astype(int)
+    df["Entrada na Ativação"] = pd.to_datetime(df["Entrada na Ativação"], errors="coerce").dt.date
+    return df
+
+
 def _pct_rampa_atual(d, meses):
     """% da rampa no mês atual (meses[0]) p/ coluna da aba Ativação."""
     det = d.get("detalhes", {}).get(meses[0])
@@ -524,6 +613,26 @@ def _tabela_principal(df, meses, dark, agrupar, aba):
             "15% potencial", format="%d",
             help="15% do Potencial = round(potencial × 0,15). "
                  "O forecast desta aba (TOTAL 6M e meses) é baseado neste valor.")
+        cc["TOTAL 6M"] = st.column_config.NumberColumn("TOTAL 6M", format="%d")
+    elif aba == "ativacao":
+        cc["Entrada na Ativação"] = st.column_config.DateColumn("Entrada na Ativação", format="DD/MM/YYYY")
+        cc["Dias em ativação"] = st.column_config.NumberColumn("Dias em ativação", format="%d")
+        cc["Potencial mês (total)"] = st.column_config.NumberColumn("Potencial mês (total)", format="%d")
+        cc["% rampa mês atual"] = st.column_config.NumberColumn("% rampa mês atual", format="%d")
+        cc["Corridas esperadas mês atual"] = st.column_config.NumberColumn("Corridas esperadas mês atual", format="%d")
+        cc["TOTAL 6M"] = st.column_config.NumberColumn("TOTAL 6M", format="%d")
+    elif aba == "ativacao_15":
+        cc["Entrada na Ativação"] = st.column_config.DateColumn("Entrada na Ativação", format="DD/MM/YYYY")
+        cc["Dias em ativação"] = st.column_config.NumberColumn("Dias em ativação", format="%d")
+        cc["Potencial mês (total)"] = st.column_config.NumberColumn("Potencial mês (total)", format="%d")
+        cc["15% potencial"] = st.column_config.NumberColumn(
+            "15% potencial", format="%d",
+            help="15% do Potencial mês (total) = round(potencial × 0,15). "
+                 "O forecast desta aba (TOTAL 6M, meses e Corridas esperadas mês "
+                 "atual) é baseado neste valor. % rampa mês atual é inalterada "
+                 "(fração da curva, independe do potencial).")
+        cc["% rampa mês atual"] = st.column_config.NumberColumn("% rampa mês atual", format="%d")
+        cc["Corridas esperadas mês atual"] = st.column_config.NumberColumn("Corridas esperadas mês atual", format="%d")
         cc["TOTAL 6M"] = st.column_config.NumberColumn("TOTAL 6M", format="%d")
     else:
         cc["Entrada na Ativação"] = st.column_config.DateColumn("Entrada na Ativação", format="DD/MM/YYYY")

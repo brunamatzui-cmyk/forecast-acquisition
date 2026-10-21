@@ -116,6 +116,30 @@ for m in meses:
 t6 = sum(d["total_linha"] for d in neg_15)
 print(f"  {'TOTAL':8s} 15%={int(t6):>10,}")
 
+# ---- aba Ativação Potencial Atualizado (forecast sobre 15%) ----
+print("\n" + "=" * 70)
+print("ATIVAÇÃO POTENCIAL ATUALIZADO (forecast sobre 15%):")
+print("=" * 70)
+ativ_15 = cf.calcular_ativacao_15(ativ, meses, HOJE)
+pot_orig_a = sum((d["potencial"] or 0) for d in ativ_15)
+pot15_a = sum(d["potencial_15"] for d in ativ_15)
+print(f"  Deals: {len(ativ_15)} | potencial original: {pot_orig_a:,} -> "
+      f"15%: {pot15_a:,} | total 6m: {int(sum(d['total_linha'] for d in ativ_15)):,}")
+print("  (todos os deals: potencial -> 15% -> dias -> total6m -> meses)")
+for d in ativ_15:
+    v = [int(d["volumes"][m]) for m in meses]
+    print(f"  {d['dealname'][:28]!r:30s} pot={d['potencial']:>7,} "
+          f"-> 15%={d['potencial_15']:>6,} dias={d.get('dias_ativacao',0):>3} "
+          f"total6m={int(d['total_linha']):>8,}")
+    print(f"     meses: {v}")
+print(f"  ... total deals 15% ativ: {len(ativ_15)}\n")
+print("  TOTAL por mês (aba Ativação 15%):")
+for m in meses:
+    t = sum(d["volumes"][m] for d in ativ_15)
+    print(f"  {m.strftime('%b/%y'):8s} 15%={int(t):>10,}")
+t6a = sum(d["total_linha"] for d in ativ_15)
+print(f"  {'TOTAL':8s} 15%={int(t6a):>10,}")
+
 # ---- self-check ----
 print("\n" + "=" * 70)
 print("SELF-CHECK:")

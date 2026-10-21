@@ -254,6 +254,39 @@ def run(negociacao, ativacao, incompletos, meses, fetched_deals, hoje=None):
     else:
         checks.append(("5.10",) + _ok("Nenhum mês da aba 15% ultrapassa potencial_15."))
 
+    # ---- 5.11 Ativação Potencial Atualizado (aba: forecast sobre 15%) ------
+    # Espelha 5.10 mas sobre a aba Ativação (rampa desde closedate, sem +5dúteis).
+    #   (a) potencial_15 == round(potencial*0.15) para cada deal.
+    #   (b) nenhum mês ultrapassa potencial_15.
+    #   (c) dias_ativacao preservado (depende só do closedate, não do potencial).
+    ativ_15 = cf.calcular_ativacao_15(ativacao, meses, hoje)
+    bad_pot15_at = [d for d in ativ_15
+                    if d["potencial_15"] != int(round((d["potencial"] or 0) * 0.15))]
+    if bad_pot15_at:
+        checks.append(("5.11",) + _warn(f"{len(bad_pot15_at)} deal(s) da Ativação 15% "
+                                        "com potencial_15 ≠ round(potencial*0.15).",
+                                        bad_pot15_at))
+    else:
+        checks.append(("5.11",) + _ok(f"potencial_15 = round(potencial*0.15) em todos "
+                                      f"os {len(ativ_15)} deals da Ativação."))
+    over_15_at = [d for d in ativ_15
+                  if any(v > d["potencial_15"] + 1 for v in d["volumes"].values())]
+    if over_15_at:
+        checks.append(("5.11",) + _warn(f"{len(over_15_at)} deal(s) da Ativação 15% com "
+                                        "mês excedendo potencial_15.", over_15_at))
+    else:
+        checks.append(("5.11",) + _ok("Nenhum mês da Ativação 15% ultrapassa potencial_15."))
+    # dias_ativacao preservado entre original e 15% (mesmo closedate)
+    bad_dias = []
+    for d_orig, d15 in zip(ativacao, ativ_15):
+        if (d_orig.get("dias_ativacao") or 0) != (d15.get("dias_ativacao") or 0):
+            bad_dias.append(d15)
+    if bad_dias:
+        checks.append(("5.11",) + _warn(f"{len(bad_dias)} deal(s) da Ativação 15% com "
+                                        "dias_ativacao divergente do original.", bad_dias))
+    else:
+        checks.append(("5.11",) + _ok("dias_ativacao preservado entre Ativação original e 15%."))
+
     return checks
 
 
